@@ -1,0 +1,4 @@
+requests>=2.31.0
+lxml>=5.1.0
+tenacity>=8.2.0
+urllib3>=2.0.0
