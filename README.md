@@ -12,7 +12,7 @@ Production-grade Amazon scraper with support for all 21 marketplaces and [2captc
 ## Features
 
 - **21 marketplaces** — .com, .de, .co.uk, .fr, .co.jp, .in, .com.br and more
-- **2captcha proxies** — native ЛК format, round-robin rotation, health tracking, ban cooldown
+- **2captcha proxies** — native format, round-robin rotation, health tracking, ban cooldown
 - **Search** — pagination, price/sort filters, automatic missing price fill
 - **Products** — price, rating, images, bullet points, variations, seller info
 - **Best Sellers** — 4 DOM strategies including current 2024–2025 layout
