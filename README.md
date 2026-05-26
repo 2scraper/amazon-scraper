@@ -1,28 +1,28 @@
-# 🛒 2parser — Amazon Scraper
+# Amazon Scraper — 2parser
 
 ![Python](https://img.shields.io/badge/Python-3.9%2B-blue?logo=python&logoColor=white)
 ![Marketplaces](https://img.shields.io/badge/Marketplaces-21-orange)
 ![Proxies](https://img.shields.io/badge/Proxies-2captcha.com-green)
 ![License](https://img.shields.io/badge/License-MIT-lightgrey)
 
-Боевой Amazon scraper для всех 21 маркетплейса с поддержкой прокси [2captcha.com](https://2captcha.com/proxy).
+Production-grade Amazon scraper with support for all 21 marketplaces and [2captcha.com](https://2captcha.com/proxy) proxy rotation.
 
 ---
 
-## ✨ Возможности
+## Features
 
-- **21 маркетплейс** — .com, .de, .co.uk, .fr, .co.jp, .in, .com.br и другие
-- **Прокси 2captcha** — формат из ЛК, ротация, health tracking, cooldown на бане
-- **Поиск** — пагинация, фильтры цены и сортировки, дозаполнение пропущенных цен
-- **Товары** — цена, рейтинг, изображения, bullet points, вариации, продавец
-- **Best Sellers** — поддержка 4 форматов DOM (включая актуальный 2024–2025)
-- **Отзывы** — автор, рейтинг, текст, верифицированная покупка
-- **Anti-bot** — 4 browser fingerprint профиля, per-market Accept-Language, 503/429 backoff
-- **Экспорт** — JSON, JSON Lines, CSV (UTF-8-BOM для Excel)
+- **21 marketplaces** — .com, .de, .co.uk, .fr, .co.jp, .in, .com.br and more
+- **2captcha proxies** — native ЛК format, round-robin rotation, health tracking, ban cooldown
+- **Search** — pagination, price/sort filters, automatic missing price fill
+- **Products** — price, rating, images, bullet points, variations, seller info
+- **Best Sellers** — 4 DOM strategies including current 2024–2025 layout
+- **Reviews** — author, rating, body, verified purchase, helpful votes
+- **Anti-bot** — 4 browser fingerprint profiles, per-market Accept-Language, 503/429 backoff
+- **Export** — JSON, JSON Lines, CSV (UTF-8-BOM, opens in Excel without conversion)
 
 ---
 
-## 📦 Установка
+## Installation
 
 ```bash
 git clone https://github.com/2parser/amazon-scraper
@@ -32,63 +32,64 @@ pip install -r requirements.txt
 
 ---
 
-## 🔑 Прокси
+## Proxies
 
-Прокси берутся из личного кабинета **2captcha.com → Proxy**.  
-Скачай список и передай через `--proxies`:
+Proxies are taken from your **2captcha.com personal account → Proxy** section.  
+Download the list and pass it via `--proxies`:
 
 ```
-# proxies.txt — один прокси на строку (формат из ЛК)
-http://1.2.3.4:8080:login:password
-http://5.6.7.8:3128:login:password
+# proxies.txt — one proxy per line (2captcha account format)
+http://host:port:login:password
+http://host:port:login:password
 ```
 
-> API-ключ 2captcha для прокси не нужен — они выдаются с логином/паролем.
+> No API key required for proxies — they come with login/password credentials.  
+> The API key (`--2captcha-key`) is only needed for CAPTCHA solving (optional).
 
 ---
 
-## 🚀 Быстрый старт
+## Quick Start
 
 ```bash
-# Поиск — 10 страниц на amazon.de, заполнить пропущенные цены
+# Search — 10 pages on amazon.de, fill missing prices
 python main.py search "iphone" -m de \
     --proxies proxies.txt \
     --pages 10 \
     --fill-prices \
     --output results.json
 
-# Один товар по ASIN
+# Single product by ASIN
 python main.py product B08N5WRWNW -m de --proxies proxies.txt
 
 # Best Sellers
 python main.py best-sellers "Electronics" -m de --proxies proxies.txt
 
-# Отзывы
+# Reviews
 python main.py reviews B08N5WRWNW -m de --proxies proxies.txt --pages 5
 
-# Массовый сбор из файла с ASIN (один ASIN на строку)
+# Bulk scraping from ASIN list file (one ASIN per line)
 python main.py bulk asins.txt -m de --proxies proxies.txt --workers 4
 
-# Все поддерживаемые маркетплейсы
+# List all supported marketplaces
 python main.py --list-marketplaces
 ```
 
 ---
 
-## 🌍 Маркетплейсы
+## Marketplaces
 
-`-m` / `--marketplace` принимает любой формат:
+`-m` / `--marketplace` accepts any format:
 
 ```bash
--m de            # TLD
--m uk            # alias (→ co.uk)
--m co.jp         # полный TLD
--m amazon.fr     # домен
--m https://www.amazon.it/...  # URL — маркетплейс определяется автоматически
+-m de                           # TLD
+-m uk                           # alias → co.uk
+-m co.jp                        # full TLD
+-m amazon.fr                    # domain
+-m https://www.amazon.it/dp/... # URL — marketplace auto-detected
 ```
 
-| TLD | Страна | Валюта |
-|-----|--------|--------|
+| TLD | Country | Currency |
+|-----|---------|----------|
 | com | United States | USD |
 | co.uk | United Kingdom | GBP |
 | de | Germany | EUR |
@@ -111,165 +112,190 @@ python main.py --list-marketplaces
 | com.be | Belgium | EUR |
 | eg | Egypt | EGP |
 
-Для каждого маркетплейса автоматически подставляется правильный `Accept-Language`  
-и страна для гео-таргетинга прокси.
+`Accept-Language` and proxy geo-targeting are automatically configured per marketplace.
 
 ---
 
-## 💡 Дозаполнение цен (`--fill-prices`)
-
-Вариативные товары (iPhone разных цветов, ноутбуки разных конфигураций)  
-не показывают цену в поисковой выдаче — Amazon выводит "Weitere Optionen".
-
-`--fill-prices` делает доп. запрос на `/dp/ASIN` для каждого такого товара:
-
-```
-INFO  fill_missing_prices: 3 позиций без цены → запрашиваем страницы товаров
-INFO    ✓  B0CHX96JDY → 788.00 EUR
-INFO    ✓  B09G995PVT → 303.00 EUR
-INFO    ✓  B0CHWWM3JH → 774.00 EUR
-INFO  fill_missing_prices: заполнено 3/3 позиций
-```
-
----
-
-## 🐍 Python API
+## Python API
 
 ```python
 from scraper import AmazonScraper
 from proxy_manager import ProxyManager
 from output import save_json, save_csv
 
-# Инициализация
+# Initialize
 scraper = AmazonScraper(
-    proxy="http://host:port:login:password",  # один прокси
-    # proxy_list=["http://...", "http://..."], # или список
+    proxy="http://host:port:login:password",  # single proxy
+    # proxy_list=["http://...", "http://..."], # or a list
     marketplace="de",
 )
 
-# Загрузка прокси из файла
+# Load proxies from file
 scraper.proxy_manager = ProxyManager.from_file("proxies.txt")
 scraper.client.proxy_manager = scraper.proxy_manager
 
-# Поиск
+# Search
 results = scraper.search(
     "iphone",
     pages=10,
     sort_by="review_rank",      # featured|price_asc|price_desc|review_rank|date_rank
-    fill_missing_prices=True,
+    fill_missing_prices=True,   # extra /dp/ request for variative products
 )
 save_json([r.to_dict() for r in results], "results.json")
 save_csv([r.to_dict() for r in results],  "results.csv")
 
-# Один товар
+# Single product
 product = scraper.get_product("B08N5WRWNW")
 print(product.title, product.price, product.currency)
 
 # Best Sellers
 items = scraper.get_best_sellers("Electronics")
 
-# Отзывы
+# Reviews
 reviews = scraper.get_reviews("B08N5WRWNW", pages=5)
 
-# Массовый сбор
+# Bulk
 products = scraper.get_products_bulk(["B08N5WRWNW", "B07VGRJDFY"], workers=3)
 ```
 
 ---
 
-## 📊 Поля данных
+## Proxy formats
 
-### Поиск
-| Поле | Тип | Описание |
-|------|-----|----------|
-| `asin` | str | Идентификатор Amazon |
-| `title` | str | Название |
-| `price` | float | Цена |
-| `currency` | str | Валюта |
-| `rating` | float | Рейтинг (1.0–5.0) |
-| `reviews_count` | int | Количество отзывов |
-| `url` | str | URL товара |
-| `sponsored` | bool | Рекламная позиция |
-| `prime_eligible` | bool | Prime доставка |
-| `image_url` | str | Изображение |
+All common formats are supported:
 
-### Страница товара
+| Format | Example |
+|--------|---------|
+| 2captcha account (main) | `http://host:port:login:password` |
+| HTTPS | `https://host:port:login:password` |
+| SOCKS5 | `socks5://host:port:login:password` |
+| No scheme | `host:port:login:password` |
+| URL format | `login:password@host:port` |
+| No auth | `host:port` |
+
+---
+
+## Fill missing prices (`--fill-prices`)
+
+Variative products (iPhones in different colors, laptops with different specs)
+don't show a single price in search results — Amazon displays "More Options" instead.
+
+`--fill-prices` automatically makes an extra `/dp/ASIN` request for each such product:
+
+```
+INFO  fill_missing_prices: 3 items without price → fetching product pages
+INFO    ✓  B0CHX96JDY → 788.00 EUR
+INFO    ✓  B09G995PVT → 303.00 EUR
+INFO    ✓  B0CHWWM3JH → 774.00 EUR
+INFO  fill_missing_prices: filled 3/3 items
+```
+
+---
+
+## Output fields
+
+### Search results
+| Field | Type | Description |
+|-------|------|-------------|
+| `asin` | str | Amazon 10-char identifier |
+| `title` | str | Product title |
+| `price` | float | Price |
+| `currency` | str | Currency (EUR, USD, GBP, JPY…) |
+| `rating` | float | Rating 1.0–5.0 |
+| `reviews_count` | int | Number of reviews |
+| `url` | str | Full product URL |
+| `sponsored` | bool | Is sponsored listing |
+| `prime_eligible` | bool | Prime delivery available |
+| `image_url` | str | Product image URL |
+
+### Product page
 `asin` · `title` · `brand` · `price` · `currency` · `list_price` · `rating` · `reviews_count` · `availability` · `prime_eligible` · `fulfilled_by_amazon` · `seller_name` · `images[]` · `bullets[]` · `description` · `category_breadcrumb[]` · `variations{}` · `deals` · `url`
 
 ### Best Sellers
 `rank` · `asin` · `title` · `price` · `currency` · `rating` · `reviews_count` · `image_url` · `url` · `prime_eligible`
 
-### Отзывы
+### Reviews
 `review_id` · `author` · `rating` · `title` · `date` · `body` · `verified_purchase` · `helpful_votes`
 
 ---
 
-## 🛡️ Anti-bot
+## Anti-bot
 
-| Механизм | Детали |
-|----------|--------|
-| Browser fingerprints | Chrome Win/Mac, Firefox, Safari — реальные UA + matching sec-ch-ua |
-| Accept-Language | По маркетплейсу: `de-DE` для .de, `ja-JP` для .co.jp и т.д. |
-| Задержки | Random 2–6с, настраивается через `--delay-min` / `--delay-max` |
-| 503 / 429 | Backoff 8с → 16с → 30с + смена прокси |
-| CAPTCHA / блок | 8 паттернов детекции, ротация UA профиля |
-| Proxy health | Round-robin, cooldown 60с после 3 банов, исключение при SR < 20% |
+| Mechanism | Details |
+|-----------|---------|
+| Browser fingerprints | Chrome Win/Mac, Firefox, Safari — real UAs + matching sec-ch-ua |
+| Accept-Language | Per marketplace: `de-DE` for .de, `ja-JP` for .co.jp, etc. |
+| Request delays | Random 2–6s, configurable via `--delay-min` / `--delay-max` |
+| 503 / 429 handling | Exponential backoff 8s → 16s → 30s + proxy swap |
+| CAPTCHA / block detection | 8 regex patterns, UA profile rotation on block |
+| Proxy health tracking | Round-robin, 60s cooldown after 3 bans, drop below 20% success rate |
 
 ---
 
-## 📁 Структура проекта
+## Output formats
+
+| Format | Extension | Notes |
+|--------|-----------|-------|
+| JSON | `.json` | Pretty-printed, full Unicode |
+| JSON Lines | `.jsonl` | One object per line, streaming-friendly |
+| CSV | `.csv` | UTF-8-BOM, opens in Excel without conversion |
+
+---
+
+## Project structure
 
 ```
 amazon_scraper/
-├── marketplace.py   ← реестр 21 маркетплейса, резолвер форматов
-├── proxy_manager.py ← пул прокси 2captcha, ротация, health tracking
+├── marketplace.py   ← registry of 21 marketplaces, format resolver
+├── proxy_manager.py ← 2captcha proxy pool, rotation, health tracking
 ├── http_client.py   ← stealth HTTP, retry, 503/429 backoff
-├── parser.py        ← lxml парсеры: product / search / reviews / best-sellers
-├── scraper.py       ← высокоуровневый API
-├── output.py        ← экспорт JSON / JSONL / CSV
-├── main.py          ← CLI
+├── parser.py        ← lxml parsers: product / search / reviews / best-sellers
+├── scraper.py       ← high-level API
+├── output.py        ← JSON / JSONL / CSV export
+├── main.py          ← CLI entry point
+├── index.html       ← product landing page
 └── requirements.txt
 ```
 
 ---
 
-## ⚙️ CLI Reference
+## CLI reference
 
 ```
 python main.py [--list-marketplaces]
-python main.py <команда> <цель> [опции]
+python main.py <command> <target> [options]
 
-Команды:
-  product         Один товар (ASIN или URL)
-  search          Поиск
-  reviews         Отзывы к товару
-  bulk            Массовый сбор из файла с ASIN
-  best-sellers    Best Sellers страница
+Commands:
+  product         Single product (ASIN or URL)
+  search          Search results
+  reviews         Product reviews
+  bulk            Bulk scraping from ASIN list file
+  best-sellers    Best Sellers page
 
-Основные опции:
-  -o, --output PATH      Файл вывода (.json | .jsonl | .csv)
-  -m, --marketplace      Маркетплейс: de, uk, jp, co.uk, amazon.fr... (default: com)
-      --proxies FILE      Файл прокси из ЛК 2captcha (один на строку)
-      --proxy STRING      Один прокси: http://host:port:login:password
-      --2captcha-key KEY  API ключ — только для решения CAPTCHA
+Core options:
+  -o, --output PATH      Output file (.json | .jsonl | .csv)
+  -m, --marketplace      Marketplace: de, uk, jp, co.uk, amazon.fr… (default: com)
+      --proxies FILE      Proxy list file from 2captcha account (one per line)
+      --proxy STRING      Single proxy: http://host:port:login:password
+      --2captcha-key KEY  API key — only for CAPTCHA solving, not for proxies
 
-Поиск:
-      --pages N           Страниц (default: 1)
+Search options:
+      --pages N           Pages to scrape (default: 1)
       --sort ORDER        featured|price_asc|price_desc|review_rank|date_rank
-      --min-price N       Мин. цена
-      --max-price N       Макс. цена
-      --fill-prices       Дозаполнить цены через /dp/ для вариативных позиций
+      --min-price N       Minimum price filter
+      --max-price N       Maximum price filter
+      --fill-prices       Fill missing prices via /dp/ for variative products
 
-Производительность:
-      --workers N         Потоков для bulk/fill-prices (default: 3)
-      --delay-min SEC     Мин. задержка (default: 2.0)
-      --delay-max SEC     Макс. задержка (default: 6.0)
+Performance:
+      --workers N         Threads for bulk/fill-prices (default: 3)
+      --delay-min SEC     Min request delay (default: 2.0)
+      --delay-max SEC     Max request delay (default: 6.0)
 
-Отладка:
-      --debug-html PATH   Сохранить raw HTML для анализа DOM
-      --list-marketplaces Показать все 21 маркетплейс и выйти
+Debug:
+      --debug-html PATH   Save raw HTML response for DOM inspection
+      --list-marketplaces Show all 21 marketplaces and exit
 ```
 
 ---
 
-*Часть проекта [2parser](https://github.com/2parser) — парсеры для популярных сайтов.*
+*Part of the [2parser](https://github.com/2parser) project — parsers for popular websites.*
