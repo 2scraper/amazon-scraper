@@ -17,6 +17,18 @@ jobs:
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+    # Skipped, not failed, when the token is absent. This repo inherited both
+    # Claude workflows from its sibling, where CLAUDE_CODE_OAUTH_TOKEN is set
+    # as a repo secret; here it is not, and the action's own environment
+    # validation fails the job ("Environment variable validation failed"),
+    # which put a permanently red check on every pull request. A check that is
+    # always red teaches everyone to ignore checks. Set the secret to turn
+    # this on:
+    #     gh secret set CLAUDE_CODE_OAUTH_TOKEN --repo 2scraper/amazon-scraper
+    # `secrets` is not available in a job-level `if`, so the presence test goes
+    # through env and is read by the step.
+    env:
+      HAS_CLAUDE_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -32,6 +44,7 @@ jobs:
 
       - name: Run Claude Code
         id: claude
+        if: env.HAS_CLAUDE_TOKEN == 'true'
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
