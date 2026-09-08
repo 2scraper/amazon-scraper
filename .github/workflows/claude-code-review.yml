@@ -49,9 +49,38 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
-          plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+          # The plugin form of this (plugin_marketplaces + plugins +
+          # '/code-review:code-review') is what the sibling repo uses and what
+          # this started as. It broke on 2026-09-08 in the CLI itself, not
+          # here: Claude Code v2.1.263 installs where the action expects and
+          # v2.1.265 does not, so every run died with
+          #   Failed to add marketplace '...claude-code.git': ENOENT ...
+          #   posix_spawn '/home/runner/.local/bin/claude'
+          # Reproduced on a re-run, and the action offers no way to pin the CLI
+          # version — only a path to an executable you installed yourself.
+          #
+          # A plain prompt needs no plugin and no marketplace, so it does not
+          # depend on that install path at all. It is also the more honest
+          # instruction to give a reviewer of THIS repo: the things worth
+          # catching here are measurements that drifted from what the code
+          # does, not style.
+          prompt: |
+            Review this pull request.
+
+            This repository is a scraper, and its README, CHANGELOG and
+            comments quote MEASURED numbers — row counts, price coverage,
+            timings, hit rates. The most valuable thing you can find is a
+            number or a claim that no longer matches the code, or a comment
+            that explains a reason the code no longer has.
+
+            Also worth flagging: a check that cannot fail, an error path that
+            swallows a failure silently, a credential that could reach a
+            command line or a log, and any place that presents a guess as a
+            fact (a defaulted currency, a fabricated sample, an unmeasured
+            claim stated plainly).
+
+            Leave inline comments on specific lines where you can. Be brief,
+            and say nothing if you find nothing.
           claude_args: '--allowedTools "mcp__github_inline_comment__create_inline_comment"'
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
