@@ -146,12 +146,20 @@ def env_value(name):
     value = os.environ.get(name)
     if value is None:
         return None
-    if value.strip().lower() in _PLACEHOLDERS:
+    stripped = value.strip()
+    if not stripped:
+        # Empty is not the same as "you left the example text in". An unset
+        # GitHub Actions secret arrives as an empty string, so warning here
+        # would print "put your real value in .env" on every canary run that
+        # deliberately has no proxy — and a warning that fires when nothing is
+        # wrong teaches people to ignore warnings.
+        return None
+    if stripped.lower() in _PLACEHOLDERS:
         logger.warning(
             "%s is still set to the placeholder from .env.example — treating it "
             "as unset. Put your real value in .env.", name)
         return None
-    return value.strip() or None
+    return stripped
 
 
 def apply(args, keys=None, quiet=False):

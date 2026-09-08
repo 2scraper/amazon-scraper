@@ -15,9 +15,23 @@ name: canary
 # datacenter addresses, and Amazon treats those less generously than the
 # residential exit the README's numbers were measured from: a red run can mean
 # the site changed (a real break) or that this address was throttled or shown a
-# captcha. The exit-code interpretation step below spells out which is which,
-# and if it proves too noisy, set the AMAZON_PROXY repo secret and uncomment
-# the --proxy line to run from a residential exit instead.
+# captcha. The exit-code interpretation step below spells out which is which.
+#
+# (First manual dispatch, 2026-09-08, from a runner with no proxy at all: 72
+# rows, 66 priced, status=complete, 3/3 pages. So a datacenter address is not
+# automatically refused — but one green run is not a promise.)
+#
+# If it does prove noisy, set the AMAZON_PROXY repo secret and nothing else:
+#
+#     gh secret set AMAZON_PROXY --repo 2scraper/amazon-scraper
+#
+# The run below passes it through the ENVIRONMENT, which env_config.py reads
+# for exactly this variable, rather than through a --proxy flag. Two reasons:
+# a credential on a command line is readable by anything that can run `ps`,
+# which is the rule this repo states and should therefore follow in its own
+# CI; and an unset secret arrives as an empty string, which the loader already
+# treats as "not configured", so the same workflow works with and without it
+# and there is no commented-out line for someone to forget to uncomment.
 on:
   schedule:
     # Once a day, off the hour, so it is not competing with everyone else's
@@ -66,12 +80,16 @@ jobs:
         # `echo "exit_code=$?"` below never runs. continue-on-error only stops
         # the step from failing the job; it does not touch the shell's errexit.
         continue-on-error: true
+        env:
+          # Empty when the secret is not set, which env_config.py treats as
+          # unset — so this line is correct in both cases and needs no edit
+          # when the secret arrives. See the header.
+          AMAZON_PROXY: ${{ secrets.AMAZON_PROXY }}
         run: |
           set +e
           python3 playwright_scraper.py \
             --url "https://www.amazon.com/s?k=bluetooth+headphones&i=electronics" \
             --pages 3 --out canary_run --dump-html canary_run.html
-            # --proxy "${{ secrets.AMAZON_PROXY }}"   # uncomment once the secret is set
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
 
       - name: Interpret the exit code
