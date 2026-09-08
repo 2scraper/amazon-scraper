@@ -459,7 +459,14 @@ Two workflows: `tests.yml` is offline only and never touches amazon.com or a
 credential; `canary.yml` runs one real 3-page listing daily and asserts
 `pages_completed`, `status == "complete"`, a product floor and a price-coverage
 floor. Three pages, not one, because with one page pagination is never
-exercised at all.
+exercised at all. Its first manual run, from a GitHub runner with no proxy at
+all, returned 72 rows with 66 priced — a datacenter address is not
+automatically refused, though one green run is not a promise.
+
+If it does turn noisy, setting an `AMAZON_PROXY` repo secret is the whole fix:
+the workflow passes it through the environment, which the config loader
+already reads, so there is no flag to add and no credential on a command
+line.
 
 ---
 
