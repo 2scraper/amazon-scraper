@@ -41,10 +41,21 @@ not the check caught it.
 ## Reporting a site change
 
 Amazon changing its markup is the normal way this stops working, and it has its
-own issue template. The one detail that saves the most time: the parser tries
-**JSON-LD first**, then a CSS + URL-pattern fallback. Knowing which of the two
-broke narrows the fix immediately. `--out dump` writes the page next to the
-output when a run finds nothing.
+own issue template. The detail that saves the most time is which of the three
+paths broke, because the parser tries them in order:
+
+1. the page kind's own anchor — `div[data-component-type="s-search-result"]`,
+   `[id^="p13n-asin-index-"]`, `div[data-hook="reviewContainer"]`;
+2. the other listing kind's anchor, in case the URL's shape misled it;
+3. the `/dp/{ASIN}` URL pattern, which logs a warning when it runs because it
+   over-collects carousel items.
+
+There is deliberately **no JSON-LD path**: Amazon publishes none. If you are
+about to add one, read the measurement in `product_parser.py` first.
+
+`--dump-html PATH` writes the exact bytes the parser was given, on success as
+well as failure, and a run that finds nothing writes a dump and a screenshot
+next to the output on its own.
 
 ## Pull requests
 
@@ -52,23 +63,31 @@ output when a run finds nothing.
 file of plain functions with inline HTML/JSON fixtures — no pytest, no
 conftest, no fixtures directory. Copy the nearest existing check and edit it.
 
-Four properties in this repo exist because they were once absent and cost real
-time. Tests pin all four, so a PR that breaks one will fail rather than
+Five properties in this repo exist because they were once absent and cost real
+time. Tests pin all five, so a PR that breaks one will fail rather than
 silently regress:
 
-- **The product URL comes from `offers.url`, not `node.url`.** No product on
-  this site carries `node.url`. Read the wrong field and every row points at the
-  category page while title, brand and price all look correct.
+- **The row's `url` is rebuilt from the ASIN, never read from an href.** A
+  sponsored tile links to `/sspa/click?...&url=%2F...%2Fdp%2FASIN...`, so
+  reading hrefs stores click trackers and misses every sponsored product. It
+  also keeps `url` stable between runs, which Amazon's `qid`/`xpid`/`ref`
+  parameters are not.
 - **A run that finds nothing writes nothing.** It must not replace a good output
   file with `[]`. `--allow-empty` is the opt-out.
 - **Exit codes are a contract**, not decoration: `0` ok, `1` crash, `2` bad
-  usage, `3` blocked by a challenge, `4` zero products, `5` remote API error,
-  `124` self-imposed timeout. A pipeline branches on these.
-- **A sku already written by an earlier page of the same run is dropped, not
-  duplicated.** All three browser engines paginate by following
-  `NEXT_PAGE_SELECTOR`; a stale or repeating link must not double a row in the
-  output. See `dedupe_by_sku` in `output_writer.py` and `diff_runs.py`, which
-  diffs two runs by the same key.
+  usage, `3` blocked (a captcha, an unresolved throttle, or a sign-in wall),
+  `4` zero rows, `5` remote API error, `6` partial. A pipeline branches on
+  these.
+- **The AWS WAF challenge is waited out, never reported as a block and never
+  sent to the solver.** A browser clears it by itself in about four seconds.
+  Reporting it as a block reports a block that does not exist; solving it bills
+  for a challenge no solver can answer. `page_flow.py` holds that policy for
+  all three engines so they cannot disagree about it.
+- **An ASIN already written by an earlier page of the same run is dropped, not
+  duplicated** — and on Amazon this is not hypothetical: sponsored placements
+  repeat across pages, so a 3-page run of 90 rows returned 77. See
+  `dedupe_by_key` in `output_writer.py`. A reviews run keys on `review_id`
+  instead, because a dozen rows legitimately share one ASIN.
 
 There is also a naming check: certain phrases are banned repo-wide and the suite
 fails naming them. If it trips, read the message — the phrase is wrong for a
