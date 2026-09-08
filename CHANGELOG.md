@@ -8,6 +8,30 @@ CLI toolkit can. Read a **patch** as "fixes" rather than as a promise that
 every flag and default is frozen: a default that changes behaviour can ship in
 one, and when it does the release notes say so first.
 
+## [0.1.1] — 2026-09-09
+
+Everything here landed after `v0.1.0` was tagged, so the 0.1.0 artifact does
+not contain it. Nothing changes for a caller: no flag, column, exit code or
+output shape moved.
+
+### Fixed
+
+- **The fixtures carried session material and one real person's data.** Real
+  page captures bring the session that fetched them (three anonymous, expired
+  `sessionId` values and their CSRF tokens) and, on a review, a real
+  customer's display name, profile permalink, review id, photo ids and words.
+  All of it is now replaced with obvious placeholders — the checks read the
+  structure of a review, not the person — and a new guard fails the suite if
+  any of it arrives with a future capture. Found while reviewing what going
+  public would actually expose.
+- **Both Claude workflows failed instead of skipping when their token is
+  absent.** They were inherited from the sibling repo, where
+  `CLAUDE_CODE_OAUTH_TOKEN` is a repo secret; unset here, the action's own
+  environment validation failed the job and put a permanently red check on
+  every pull request — and a check that is always red teaches everyone to
+  ignore checks. Setting the secret turns the review back on with no further
+  change.
+
 ## [0.1.0] — 2026-09-08
 
 First release. The repository previously held a different, unrelated Amazon
@@ -51,7 +75,7 @@ scrapers. **Nothing from the previous code is source- or output-compatible.**
 - **A `page` column** beside `position`, because Amazon's `data-index`
   restarts on every page and position alone is ambiguous across a paginated
   run.
-- 239 offline checks in `smoke_test.py`, with fixtures cut from real captures;
+- 244 offline checks in `smoke_test.py`, with fixtures cut from real captures;
   a daily canary against a real 3-page listing; `tests.yml` on Python 3.9 and
   3.12 with an `engine-smoke` job that fails on any unexpected skip.
 
@@ -91,4 +115,5 @@ scrapers. **Nothing from the previous code is source- or output-compatible.**
   during development was served one; it is exercised only by an offline
   fixture written from Amazon's documented markup.
 
+[0.1.1]: https://github.com/2scraper/amazon-scraper/releases/tag/v0.1.1
 [0.1.0]: https://github.com/2scraper/amazon-scraper/releases/tag/v0.1.0
