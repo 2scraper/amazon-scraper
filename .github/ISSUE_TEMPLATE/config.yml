@@ -1,0 +1,14 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 2Captcha support
+    url: https://2captcha.com/support
+    about: >-
+      Billing, an API key that will not authenticate, profile or quota limits
+      (ERROR_MAX_PROFILES), proxy availability. Anything about the service
+      rather than about this code — support can see your account, we cannot.
+  - name: 2Captcha API documentation
+    url: https://2captcha.com/api-docs
+    about: Task types, parameters and error codes for the solver API.
+  - name: Other scrapers in this family
+    url: https://github.com/2scraper
+    about: Same structure, other sites.

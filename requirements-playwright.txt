@@ -1,0 +1,6 @@
+# The recommended engine. After installing, fetch the browser itself:
+#
+#   pip install -r requirements-playwright.txt
+#   playwright install chromium
+#
+playwright>=1.40.0
