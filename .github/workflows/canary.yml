@@ -1,0 +1,195 @@
+name: canary
+
+# tests.yml (deliberately) never touches amazon.com — see its own header for
+# why. That leaves a real gap: a markup change on the site itself only shows up
+# when a user hits it and files an issue, while the offline badge stays green
+# throughout. This workflow is the other half — a real run, on a real search
+# URL, on a schedule — so a site-side break is caught here first.
+#
+# Uses no 2Captcha product and no secret by default, because the README's
+# headline claim is that an ordinary browser on a clean IP returns three pages
+# of products with no key, no proxy and no account, and this is where that
+# claim gets exercised continuously.
+#
+# EXPECT MORE NOISE HERE THAN ON A RESIDENTIAL IP. GitHub Actions runners are
+# datacenter addresses, and Amazon treats those less generously than the
+# residential exit the README's numbers were measured from: a red run can mean
+# the site changed (a real break) or that this address was throttled or shown a
+# captcha. The exit-code interpretation step below spells out which is which,
+# and if it proves too noisy, set the AMAZON_PROXY repo secret and uncomment
+# the --proxy line to run from a residential exit instead.
+on:
+  schedule:
+    # Once a day, off the hour, so it is not competing with everyone else's
+    # on-the-hour cron jobs for runner availability.
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  live-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Playwright engine
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      - name: Scrape a real, known-good search listing
+        id: run
+        # The same filtered search URL the README uses as its worked example,
+        # so a 0-result run means either the site changed or this address was
+        # refused — not "this URL never had products". Filtered (`&i=`) rather
+        # than a bare query, because a department-scoped search is the shape a
+        # real monitoring job uses.
+        #
+        # --pages 3, not 1: with one page pagination is never exercised at
+        # all, so a renamed next-page class (or the ?page= convention
+        # breaking) would stay invisible here — which is precisely the silent
+        # decay this workflow exists to catch. Amazon keeps serving a valid
+        # page for any page number, so the run's own "this page added nothing
+        # new" terminator is what has to be trusted, and three pages is enough
+        # to exercise it.
+        #
+        # continue-on-error: the exit code is read explicitly below so the
+        # interpretation (parser break vs. probable address block) can be
+        # printed before the job goes red.
+        #
+        # set +e: GitHub Actions runs `run:` steps as `bash -e`, so without
+        # this a non-zero scraper exit aborts the script on THAT line and the
+        # `echo "exit_code=$?"` below never runs. continue-on-error only stops
+        # the step from failing the job; it does not touch the shell's errexit.
+        continue-on-error: true
+        run: |
+          set +e
+          python3 playwright_scraper.py \
+            --url "https://www.amazon.com/s?k=bluetooth+headphones&i=electronics" \
+            --pages 3 --out canary_run --dump-html canary_run.html
+            # --proxy "${{ secrets.AMAZON_PROXY }}"   # uncomment once the secret is set
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Interpret the exit code
+        run: |
+          code="${{ steps.run.outputs.exit_code }}"
+          case "$code" in
+            0)   echo "OK — products parsed from a live run." ;;
+            3)   echo "::error::Blocked before parsing (exit 3): Amazon's image captcha, an unresolved 503 throttle, or a sign-in wall. Check canary_run.meta.json's stop_reason in the artifacts, and note this may be this runner's datacenter address rather than a site change — see AMAZON_PROXY in this workflow's header." ;;
+            4)   echo "::error::Ran fine but parsed 0 rows (exit 4) on a URL known to have plenty — this is the shape a real site-side break takes." ;;
+            6)   echo "::error::Partial run (exit 6) — some pages were gathered and then the run stopped early. canary_run.meta.json names which pages failed." ;;
+            2)   echo "::error::Bad usage (exit 2) — the workflow's own arguments are wrong, not the site." ;;
+            *)   echo "::error::Unexpected exit code $code (see the step above for the traceback)." ;;
+          esac
+          test "$code" = "0"
+
+      - name: Sanity-check the scraped data
+        # Exit 0 only means "some rows were written". It says nothing about
+        # whether the page actually rendered: a snapshot taken too early still
+        # writes rows, just with fields empty. Every floor below is set from a
+        # measured figure and deliberately well under it, so this fails on a
+        # collapse rather than on normal variation.
+        run: |
+          python3 - <<'EOF'
+          import json, sys
+          from pathlib import Path
+
+          PAGES_REQUESTED = 3
+          # Measured 2026-09-08 from a residential European exit: 3 pages of
+          # this URL gave 90 rows, 77 after duplicates were dropped, at 24-30
+          # organic tiles per page. The floor is set at half of that.
+          MIN_ROWS = 40
+          # Measured price coverage on this URL: 71-83%. Amazon genuinely
+          # withholds the price on roughly a quarter of tiles, so the floor is
+          # 50% and not the 90% a site that always prints a price would take.
+          MIN_PRICED_SHARE = 0.5
+
+          rows = json.loads(Path("canary_run.json").read_text())
+          meta = json.loads(Path("canary_run.meta.json").read_text())
+          fail = []
+
+          if len(rows) < MIN_ROWS:
+              fail.append(f"only {len(rows)} rows, expected at least {MIN_ROWS} "
+                          f"across {PAGES_REQUESTED} pages")
+
+          priced = sum(1 for r in rows if r.get("price") is not None)
+          if rows and priced / len(rows) < MIN_PRICED_SHARE:
+              fail.append(f"only {priced}/{len(rows)} rows have a price "
+                          f"(floor {MIN_PRICED_SHARE:.0%}) — either Amazon is "
+                          f"withholding far more than usual, or the price node "
+                          f"moved")
+
+          # Where the price came from. Every priced row on every measured run
+          # read `.a-price .a-offscreen`; a run that fell back to reassembling
+          # the visually split price for most rows means that node changed, and
+          # the numbers are worth re-checking even though they are not wrong.
+          if priced:
+              offscreen = sum(1 for r in rows if r.get("price_source") == "offscreen")
+              if offscreen / priced < 0.9:
+                  fail.append(f"only {offscreen}/{priced} priced rows came from "
+                              f"the .a-offscreen node — the price markup has "
+                              f"probably changed")
+
+          # Fields that were 100% populated on every page measured. Any of them
+          # collapsing means an anchor moved.
+          for field, floor in (("title", 0.95), ("rating", 0.8),
+                               ("review_count", 0.8), ("image_url", 0.95),
+                               ("sku", 1.0), ("category", 1.0)):
+              got = sum(1 for r in rows if r.get(field) not in (None, ""))
+              if rows and got / len(rows) < floor:
+                  fail.append(f"{field} present on only {got}/{len(rows)} rows "
+                              f"(floor {floor:.0%})")
+
+          # A review_count is a count, not a rating with its digits glued on.
+          # This exact shape shipped once: "4.4 out of 5 stars, 279,961
+          # ratings" read as 445279961.
+          absurd = [r["sku"] for r in rows
+                    if isinstance(r.get("review_count"), int)
+                    and r["review_count"] > 50_000_000]
+          if absurd:
+              fail.append(f"{len(absurd)} row(s) have an implausible "
+                          f"review_count (>50M): {absurd[:3]} — the count is "
+                          f"being read from a node that also holds the rating")
+
+          # The point of running more than one page.
+          if meta.get("pages_completed", 0) < PAGES_REQUESTED:
+              fail.append(f"pagination stopped after {meta.get('pages_completed')} "
+                          f"of {PAGES_REQUESTED} pages (stop_reason="
+                          f"{meta.get('stop_reason')!r}) — the next-page class or "
+                          f"the ?page= convention has probably broken")
+          if meta.get("status") != "complete":
+              fail.append(f"run status is {meta.get('status')!r}, not 'complete'")
+          if meta.get("mode") != "listing":
+              fail.append(f"run mode is {meta.get('mode')!r}, not 'listing'")
+          if meta.get("source") != "amazon.com":
+              fail.append(f"run source is {meta.get('source')!r} — the URL was "
+                          f"redirected to another marketplace")
+
+          for line in fail:
+              print(f"::error::{line}")
+          print(f"[canary] {len(rows)} rows, {priced} priced, "
+                f"status={meta.get('status')}, "
+                f"pages={meta.get('pages_completed')}/{PAGES_REQUESTED}")
+          sys.exit(1 if fail else 0)
+          EOF
+
+      - name: Upload run artifacts (output, HTML snapshot, debug dumps)
+        # Always, not just on failure: a run that returns the WRONG numbers
+        # with no error is exactly the regression that needs the actual bytes
+        # the parser saw, not a pass/fail badge.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-run-${{ github.run_id }}
+          path: |
+            canary_run.json
+            canary_run.csv
+            canary_run.meta.json
+            canary_run.html*
+            canary_run_page*_debug.*
+          if-no-files-found: ignore
+          retention-days: 14

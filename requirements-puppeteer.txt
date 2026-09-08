@@ -1,0 +1,8 @@
+# Puppeteer engine, via pyppeteer.
+#
+# Downloads its own Chromium on first run.
+#
+# Note: pyppeteer pins pyee<12 and urllib3<2.0, which conflict with playwright
+# and selenium respectively. Prefer a separate virtualenv for this engine.
+#
+pyppeteer>=1.0.2

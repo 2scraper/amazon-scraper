@@ -1,0 +1,214 @@
+name: tests
+
+# Runs the offline suite only. Nothing here touches amazon.com, 2captcha.com
+# or any credential — GitHub Actions has no key, and a CI job that hits a live
+# site fails for reasons that have nothing to do with the commit.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 is the floor the README claims. Claiming it without testing it is
+        # how a walrus operator or a `X | None` annotation ships and breaks it.
+        python-version: ["3.9", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install core dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Byte-compile everything
+        # Catches a syntax error on the oldest supported Python before the
+        # suite gets a chance to skip the file.
+        run: python -m compileall -q .
+
+      - name: Offline test suite
+        # Prints its own count. No network, no key, ~1s.
+        run: python smoke_test.py
+
+      - name: Offline test suite, via pytest
+        # tests/test_smoke.py wraps the same run above for the pytest entry
+        # point pyproject.toml declares — this step exists so THAT wrapper
+        # can't silently rot even though the line above already covers the
+        # actual checks.
+        run: |
+          pip install pytest
+          pytest -q
+
+      - name: Every CLI answers --help
+        # A crash in argparse setup or a bad local import is invisible to the
+        # test suite but breaks the first thing any user types. The engine
+        # libraries are deliberately NOT installed here, so an ImportError
+        # naming one of them is expected; anything else is a failure.
+        run: |
+          python - <<'EOF'
+          import subprocess, sys
+
+          ENGINE_LIBS = ("playwright", "pyppeteer", "selenium", "webdriver_manager")
+          failed = []
+
+          for script in ["playwright_scraper.py", "puppeteer_scraper.py",
+                         "selenium_scraper.py", "scraper_api_client.py",
+                         "fingerprint_client.py", "env_config.py",
+                         "diff_runs.py"]:
+              r = subprocess.run([sys.executable, script, "--help"],
+                                 capture_output=True, text=True)
+              if r.returncode == 0:
+                  print(f"ok       {script}")
+                  continue
+              blob = r.stdout + r.stderr
+              if "ModuleNotFoundError" in blob and any(l in blob for l in ENGINE_LIBS):
+                  print(f"skipped  {script} (engine library not installed here)")
+                  continue
+              print(f"FAILED   {script}\n{blob}")
+              failed.append(script)
+
+          sys.exit(1 if failed else 0)
+          EOF
+
+      - name: Committed sample output is real
+        # The README links to these two files, so a push without them ships
+        # broken links. And a sample invented by hand drifts from the schema and
+        # teaches readers the wrong field names, so these are cut from a real
+        # run rather than written by hand.
+        run: |
+          python - <<'EOF'
+          import csv, json, sys
+          from pathlib import Path
+
+          MARKERS = ("sample-product-", "example brand", "sample product",
+                     "product description text", "lorem ipsum")
+
+          fail = []
+          for name in ("sample_output.json", "sample_output.csv"):
+              if not Path(name).is_file():
+                  fail.append(f"{name} is missing — regenerate it from a real run")
+
+          if not fail:
+              rows = json.loads(Path("sample_output.json").read_text())
+              if not rows:
+                  fail.append("sample_output.json is empty")
+              blob = json.dumps(rows).lower()
+              hit = [m for m in MARKERS if m in blob]
+              if hit:
+                  fail.append(f"sample_output.json looks fabricated: {hit}")
+
+              # Column set must match what the writers actually produce.
+              from output_writer import Product
+              from dataclasses import asdict
+              expected = list(asdict(Product()).keys())
+              for i, row in enumerate(rows):
+                  if list(row.keys()) != expected:
+                      fail.append(f"row {i} columns drifted from output_writer.Product")
+                      break
+
+              with open("sample_output.csv", newline="", encoding="utf-8") as f:
+                  header = next(csv.reader(f))
+              if header != expected:
+                  fail.append("sample_output.csv header drifted from output_writer.Product")
+
+          for line in fail:
+              print("FAILED:", line)
+          sys.exit(1 if fail else 0)
+          EOF
+
+      - name: Config reporter runs with no .env present
+        run: python env_config.py
+
+      - name: No credentials committed
+        # A key pasted into a file during debugging is the one mistake in this
+        # repo that cannot be undone by a later commit.
+        run: |
+          set -e
+          if grep -rInE '(ws|wss)://[^ "'"'"']+:[^ "'"'"']+@' \
+               --include='*.py' --include='*.md' --include='*.txt' --include='*.yml' . \
+             | grep -vE 'USER:PASS|user:pass|ACCOUNT:PASSWORD|\{login\}|\*\*\*|password\}@'; then
+            echo "FAILED: what looks like a real credentialled URL is committed"
+            exit 1
+          fi
+          if grep -rIn --include='*.py' --include='*.md' -E '\b[0-9a-f]{32}\b' . \
+             | grep -viE 'sha|hash|nonce|example|md5'; then
+            echo "FAILED: what looks like a 2captcha API key is committed"
+            exit 1
+          fi
+          echo "clean"
+
+  engine-smoke:
+    # The offline job above installs NO engine library on purpose (that is what
+    # makes it offline), so every engine-guarded check in smoke_test.py skips
+    # in it — and "skipped, engine absent" reads exactly like a passing run.
+    # This job makes those checks actually execute.
+    #
+    # ONE VENV PER ENGINE, and not `pip install playwright pyppeteer selenium`
+    # into one environment, which is what this started as. Two reasons, and the
+    # second is why it matters:
+    #
+    #   * The three engines' pins are mutually unsatisfiable (playwright wants
+    #     pyee>=13, pyppeteer wants pyee<12; pyppeteer wants urllib3<2,
+    #     selenium wants >=2.6), which is exactly what the README tells users,
+    #     so a venv each is also what a user actually does.
+    #   * Installed together and UNPINNED, pip resolved the conflict by
+    #     reaching for pyppeteer 0.0.25 — a stub release nobody uses — instead
+    #     of the >=1.0.2 requirements-puppeteer.txt asks for. CI was green
+    #     against a version the repo does not support. Installing from the
+    #     requirements files, separately, tests the versions users get.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [playwright, puppeteer, selenium]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install core + the ${{ matrix.engine }} engine, in its own venv
+        # No browser binaries: the offline suite imports these libraries and
+        # never launches one.
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt \
+                                -r requirements-${{ matrix.engine }}.txt
+          echo "--- what actually got installed ---"
+          .venv/bin/pip list --format=freeze | grep -iE '^(playwright|pyppeteer|selenium|pyee|urllib3|beautifulsoup4)='
+
+      - name: The requirements file is self-consistent
+        # Passes here precisely BECAUSE each engine has its own venv. Run in a
+        # shared one it would report the three-way conflict above, which is the
+        # thing this layout exists to avoid.
+        run: .venv/bin/pip check
+
+      - name: Offline suite, with ${{ matrix.engine }} actually importable
+        # The suite names each engine it could not import. In this job that
+        # engine IS installed, so naming it means a real import error rather
+        # than an expected absence — the other two engines are absent here by
+        # design and their skips are fine.
+        run: |
+          set -o pipefail
+          .venv/bin/python smoke_test.py | tee smoke.log
+          if grep -q "${{ matrix.engine }}_scraper could not be imported" smoke.log; then
+            echo "FAILED: ${{ matrix.engine }}_scraper failed to import even though"
+            echo "        ${{ matrix.engine }} is installed in this job."
+            exit 1
+          fi
+
+      - name: The ${{ matrix.engine }} CLI answers --help
+        run: .venv/bin/python ${{ matrix.engine }}_scraper.py --help >/dev/null

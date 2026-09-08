@@ -1,0 +1,58 @@
+name: Site changed / selectors broke
+description: Amazon changed something and the parser no longer matches.
+labels: ["site-change"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the most common way a scraper stops working, and it is worth its
+        own report because the fix is different from a code bug: something on
+        amazon.com moved.
+
+        Useful to know before filing: the parser tries **JSON-LD first**, then a
+        CSS + URL-pattern fallback. Which one broke narrows the fix a lot.
+
+  - type: dropdown
+    id: what_broke
+    attributes:
+      label: What stopped matching
+      options:
+        - Products (0 rows on a page that visibly has products)
+        - A specific field is null or wrong (price, brand, sku, image, URL)
+        - Pagination stops early or repeats a page
+        - The captcha detector finds nothing on a page that has one
+        - Something else
+    validations:
+      required: true
+
+  - type: input
+    id: url
+    attributes:
+      label: URL
+      description: The exact listing URL, and the country your exit IP was in.
+      placeholder: "https://www.amazon.com/s?k=wireless+headphones (marketplace: .com, exit IP: DE)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence from the page
+      description: |
+        Whichever of these you can get. A capture beats a description.
+
+        - JSON-LD as the page actually serves it:
+          `python3 -c "import json,sys,re;h=open('dump.html').read();print([m[:400] for m in re.findall(r'<script type=\"application/ld\\+json\">(.*?)</script>',h,re.S)][:2])"`
+        - Or open devtools and paste one `Product` node from the `ItemList`.
+        - For a field problem: the value you got, and the value on the page.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: >-
+        Whether it reproduces on a second engine, whether it reproduces from a
+        different country, and when it last worked.

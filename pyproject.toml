@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "amazon-scraper"
+version = "0.1.0"
+description = "Amazon scraper: search results, best-seller grids, product pages and public reviews, across 21 marketplaces."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [{ name = "2Captcha" }]
+
+# Kept identical to requirements.txt on purpose — that file, not this one, is
+# what the README tells a new clone to run first, so a change to one has to be
+# mirrored in the other by hand. CI's byte-compile + smoke_test.py steps only
+# install requirements.txt, so a drift here would go unnoticed there too.
+dependencies = [
+    "beautifulsoup4>=4.12.0",
+    "requests>=2.31.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/2scraper/amazon-scraper"
+
+# Mirrors requirements-playwright.txt / requirements-puppeteer.txt /
+# requirements-selenium.txt. Install exactly one — see those files for why:
+# playwright and pyppeteer pin incompatible pyee versions, pyppeteer and
+# selenium collide on urllib3. `pip install .[playwright]` etc. is equivalent
+# to `pip install -r requirements.txt -r requirements-playwright.txt`.
+[project.optional-dependencies]
+playwright = ["playwright>=1.40.0"]
+puppeteer = ["pyppeteer>=1.0.2"]
+selenium = ["selenium>=4.15.0"]
+dev = ["pytest>=7.0"]
+
+[tool.setuptools]
+# This repo is a flat collection of standalone scripts, not a package
+# directory — list them explicitly rather than relying on setuptools'
+# flat-layout auto-discovery, which refuses to guess among this many
+# top-level modules. smoke_test.py is excluded on purpose: it is a runner
+# invoked as a script (see CONTRIBUTING.md), not a module an installed
+# dependency would import.
+py-modules = [
+    "captcha_solver",
+    "diff_runs",
+    "env_config",
+    "fingerprint_client",
+    "output_writer",
+    "page_flow",
+    "playwright_scraper",
+    "product_parser",
+    "proxy_pool",
+    "puppeteer_scraper",
+    "scraper_api_client",
+    "selenium_scraper",
+]
+license-files = ["LICENSE"]
+
+[tool.pytest.ini_options]
+# smoke_test.py is a self-contained runner, not a pytest suite (see
+# CONTRIBUTING.md for why) — tests/test_smoke.py wraps it as a single pytest
+# test so `pytest` works as an entry point without maintaining two copies of
+# the same ~240 checks. Scoped to tests/ so pytest doesn't also try, and fail,
+# to collect the engine scripts and product_parser.py as test modules.
+testpaths = ["tests"]

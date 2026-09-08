@@ -1,0 +1,15 @@
+# Selenium engine.
+#
+# Works against a browser it launches itself. It CANNOT attach to an
+# authenticated remote CDP endpoint: chromedriver's `debuggerAddress` takes a
+# bare host:port with nowhere to put credentials. Use Playwright or pyppeteer
+# for that — see README.
+#
+selenium>=4.15.0
+
+# Optional. Only used when selenium_scraper.py launches its own Chrome AND you
+# have not passed --chromedriver. The import is lazy, so the remote path never
+# needs it. If you already have a chromedriver on disk, skip this and pass
+# --chromedriver instead — webdriver-manager would try to download a copy of a
+# binary you already have, which also fails behind an egress allowlist.
+# webdriver-manager>=4.0.0

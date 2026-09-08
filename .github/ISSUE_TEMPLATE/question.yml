@@ -1,0 +1,30 @@
+name: Question
+description: How do I ... ?
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Worth a look first, in this order:
+
+        - [TROUBLESHOOTING.md](../blob/main/TROUBLESHOOTING.md) — ordered by how
+          often each thing actually happens
+        - The README section on the 2Captcha product you are using
+        - `python3 env_config.py` — reports what credentials are configured,
+          without printing them
+
+  - type: textarea
+    id: question
+    attributes:
+      label: What are you trying to do
+      description: >-
+        The goal, not only the step that is stuck — often there is a shorter
+        route to it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you tried
+      render: shell
