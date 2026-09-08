@@ -43,11 +43,37 @@ jobs:
         with:
           fetch-depth: 1
 
+      # Installed here, from the STABLE channel, instead of letting the action
+      # fetch `latest` for itself. On 2026-09-08 `latest` was 2.1.265 and its
+      # native install left no binary where the action looks, so every run died
+      # with:
+      #     Claude Code native binary not found at /home/runner/.local/bin/claude
+      # It killed the plugin form and the plain-prompt form alike — the binary
+      # is simply absent — and a re-run reproduced it. `stable` was 2.1.236 and
+      # is upstream's own known-good pointer, so this pins away from the broken
+      # release WITHOUT hardcoding a version: when upstream promotes a newer
+      # stable, this picks it up with no edit here.
+      #
+      # Remove both this step and path_to_claude_code_executable once `latest`
+      # installs correctly again.
+      - name: Install Claude Code (stable channel)
+        if: env.HAS_CLAUDE_TOKEN == 'true'
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash -s stable
+          "$HOME/.local/bin/claude" --version
+          # Through GITHUB_ENV, not `${{ env.HOME }}`: HOME is a runner
+          # variable and is not in the workflow `env` context, so the
+          # expression form expands to an empty string and the action falls
+          # back to installing `latest` — the very thing this step exists to
+          # avoid, and silently.
+          echo "CLAUDE_BIN=$HOME/.local/bin/claude" >> "$GITHUB_ENV"
+
       - name: Run Claude Code Review
         id: claude-review
         if: env.HAS_CLAUDE_TOKEN == 'true'
         uses: anthropics/claude-code-action@v1
         with:
+          path_to_claude_code_executable: ${{ env.CLAUDE_BIN }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # The plugin form of this (plugin_marketplaces + plugins +
           # '/code-review:code-review') is what the sibling repo uses and what
