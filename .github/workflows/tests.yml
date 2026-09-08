@@ -148,16 +148,30 @@ jobs:
           echo "clean"
 
   engine-smoke:
-    # The offline job above installs NO engine library on purpose (that's
-    # what makes it offline), which means smoke_test.py's own
-    # playwright_scraper/puppeteer_scraper-guarded checks (UA built from the
-    # real launched browser version, the content() navigation-race retry,
-    # fingerprint glue) silently skip in every CI run — "skipped, engine not
-    # installed" reads the same in the log whether that's expected or a real
-    # import regression. This job installs the packages (not the browser
-    # binaries — the offline suite never launches one) so those checks
-    # actually execute at least once, and fails if they report skipped anyway.
+    # The offline job above installs NO engine library on purpose (that is what
+    # makes it offline), so every engine-guarded check in smoke_test.py skips
+    # in it — and "skipped, engine absent" reads exactly like a passing run.
+    # This job makes those checks actually execute.
+    #
+    # ONE VENV PER ENGINE, and not `pip install playwright pyppeteer selenium`
+    # into one environment, which is what this started as. Two reasons, and the
+    # second is why it matters:
+    #
+    #   * The three engines' pins are mutually unsatisfiable (playwright wants
+    #     pyee>=13, pyppeteer wants pyee<12; pyppeteer wants urllib3<2,
+    #     selenium wants >=2.6), which is exactly what the README tells users,
+    #     so a venv each is also what a user actually does.
+    #   * Installed together and UNPINNED, pip resolved the conflict by
+    #     reaching for pyppeteer 0.0.25 — a stub release nobody uses — instead
+    #     of the >=1.0.2 requirements-puppeteer.txt asks for. CI was green
+    #     against a version the repo does not support. Installing from the
+    #     requirements files, separately, tests the versions users get.
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [playwright, puppeteer, selenium]
+
     steps:
       - uses: actions/checkout@v4
 
@@ -165,35 +179,36 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install core + engine packages (no browser binaries needed)
-        # ALL THREE engines, including selenium. It was missing here at first,
-        # and the selenium-guarded checks therefore skipped in every CI run —
-        # which hid a crash in one of them (a mock that had gone stale against
-        # the code it stands in for) until someone happened to install selenium
-        # locally. `pip check` will complain about the pins these three
-        # disagree on; that is expected and harmless here, because the offline
-        # suite only ever imports them, never launches a browser.
+      - name: Install core + the ${{ matrix.engine }} engine, in its own venv
+        # No browser binaries: the offline suite imports these libraries and
+        # never launches one.
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install playwright pyppeteer selenium
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt \
+                                -r requirements-${{ matrix.engine }}.txt
+          echo "--- what actually got installed ---"
+          .venv/bin/pip list --format=freeze | grep -iE '^(playwright|pyppeteer|selenium|pyee|urllib3|beautifulsoup4)='
 
-      - name: Offline test suite, with engines actually importable
-        # The suite prints "N group(s) of checks SKIPPED" whenever an engine
-        # import fails. In THIS job every engine is installed, so any skip at
-        # all means a real import error rather than an expected absence —
-        # matching on the generic line rather than per-library names so a
-        # newly added engine-guarded group cannot quietly skip either.
+      - name: The requirements file is self-consistent
+        # Passes here precisely BECAUSE each engine has its own venv. Run in a
+        # shared one it would report the three-way conflict above, which is the
+        # thing this layout exists to avoid.
+        run: .venv/bin/pip check
+
+      - name: Offline suite, with ${{ matrix.engine }} actually importable
+        # The suite names each engine it could not import. In this job that
+        # engine IS installed, so naming it means a real import error rather
+        # than an expected absence — the other two engines are absent here by
+        # design and their skips are fine.
         run: |
-          python smoke_test.py | tee smoke.log
-          if grep -q "group(s) of checks SKIPPED" smoke.log; then
-            echo "FAILED: engine-guarded checks skipped even though every engine"
-            echo "        package is installed in this job — likely a real import error."
+          set -o pipefail
+          .venv/bin/python smoke_test.py | tee smoke.log
+          if grep -q "${{ matrix.engine }}_scraper could not be imported" smoke.log; then
+            echo "FAILED: ${{ matrix.engine }}_scraper failed to import even though"
+            echo "        ${{ matrix.engine }} is installed in this job."
             exit 1
           fi
 
-      - name: Every engine CLI answers --help
-        run: |
-          python playwright_scraper.py --help >/dev/null
-          python puppeteer_scraper.py --help >/dev/null
-          python selenium_scraper.py --help >/dev/null
+      - name: The ${{ matrix.engine }} CLI answers --help
+        run: .venv/bin/python ${{ matrix.engine }}_scraper.py --help >/dev/null

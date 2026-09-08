@@ -41,6 +41,18 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 from urllib.parse import urlparse, urljoin, parse_qsl
 
+# At module level, deliberately, and not inside the launch path where it
+# started out. The offline suite guards `import puppeteer_scraper` behind
+# try/except ImportError and REPORTS the skip, and CI's engine-smoke job fails
+# on any reported skip — that whole mechanism only works if importing this
+# module actually requires the driver. With the import hidden inside
+# _Session.open(), the module imported cleanly with no pyppeteer installed at
+# all, the group never skipped, and CI could not have noticed a broken import.
+# It also let CI install pyppeteer 0.0.25 (a stub, resolved from an unpinned
+# `pip install pyppeteer`) without anything failing, because nothing ever
+# imported it.
+from pyppeteer import launch, connect
+
 from captcha_solver import (detect_recaptcha_v3, detect_recaptcha_in_page,
                             reconcile_detections, solve_recaptcha,
                             INJECT_TOKEN_JS, detect_amazon_captcha,
@@ -184,7 +196,6 @@ class _Session:
         self.browser = self.page = None
 
     def open(self):
-        from pyppeteer import launch, connect
         if self.remote:
             logger.info("Connecting to an existing browser over CDP: %s",
                         _mask_credentials(self.args.cdp_endpoint))

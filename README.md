@@ -430,7 +430,7 @@ says something about our own two snapshots, not about Amazon. Same for
 ## Testing
 
 ```bash
-python3 smoke_test.py     # 228 offline checks, no network, no browser
+python3 smoke_test.py     # 239 offline checks, no network, no browser
 pytest                    # the same suite, as one test
 python3 env_config.py     # what configuration was picked up (prints no secrets)
 ```

@@ -61,6 +61,6 @@ license-files = ["LICENSE"]
 # smoke_test.py is a self-contained runner, not a pytest suite (see
 # CONTRIBUTING.md for why) — tests/test_smoke.py wraps it as a single pytest
 # test so `pytest` works as an entry point without maintaining two copies of
-# the same ~230 checks. Scoped to tests/ so pytest doesn't also try, and fail,
+# the same ~240 checks. Scoped to tests/ so pytest doesn't also try, and fail,
 # to collect the engine scripts and product_parser.py as test modules.
 testpaths = ["tests"]

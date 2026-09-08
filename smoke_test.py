@@ -34,6 +34,7 @@ identically to a real import error.
 Exits non-zero on any failure.
 """
 
+import ast
 import inspect
 import json
 import os
@@ -1207,6 +1208,30 @@ def test_engines(skips):
                     "wait_out_waf_challenge" in source)
         ok &= check("%s retries Amazon's 503 throttle page" % name,
                     "throttled" in source)
+
+    # THE GUARD FOR THE GUARD. Everything above only means something if
+    # importing an engine module genuinely requires its driver library: the
+    # suite reports a skip when the import fails, and CI's engine-smoke job
+    # fails on any reported skip. This engine's pyppeteer import once sat
+    # inside the launch path instead, so the module imported cleanly with no
+    # pyppeteer installed, the group never skipped, and CI happily ran against
+    # a stub version (pyppeteer 0.0.25, resolved from an unpinned install)
+    # without noticing. Checked on the SOURCE rather than by importing,
+    # because by the time this runs the library is already loaded.
+    DRIVER_MODULES = {"playwright_scraper": "playwright",
+                      "puppeteer_scraper": "pyppeteer",
+                      "selenium_scraper": "selenium"}
+    for name, mod in loaded.items():
+        driver = DRIVER_MODULES[name]
+        tree = ast.parse(inspect.getsource(mod))
+        top_level = any(
+            (isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == driver)
+            or (isinstance(node, ast.Import)
+                and any(a.name.split(".")[0] == driver for a in node.names))
+            for node in tree.body)
+        ok &= check("%s imports %s at module level, so a missing driver is a "
+                    "reported skip rather than a silently vacuous check"
+                    % (name, driver), top_level)
 
     # Flag parity: the family's contract is that the three CLIs take the same
     # flags, so a script can switch engines without rewriting its arguments.
