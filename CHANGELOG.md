@@ -51,7 +51,7 @@ scrapers. **Nothing from the previous code is source- or output-compatible.**
 - **A `page` column** beside `position`, because Amazon's `data-index`
   restarts on every page and position alone is ambiguous across a paginated
   run.
-- 239 offline checks in `smoke_test.py`, with fixtures cut from real captures;
+- 244 offline checks in `smoke_test.py`, with fixtures cut from real captures;
   a daily canary against a real 3-page listing; `tests.yml` on Python 3.9 and
   3.12 with an `engine-smoke` job that fails on any unexpected skip.
 
@@ -64,6 +64,14 @@ scrapers. **Nothing from the previous code is source- or output-compatible.**
   own requirements file into its own venv, which is both what the README tells
   users to do and the only way to get the versions they get; `pip check` runs
   per venv as well.
+- **The fixtures carried session material and one real person's data.** Real
+  page captures bring the session that fetched them (three anonymous, expired
+  `sessionId` values and their CSRF tokens) and, on a review, a real
+  customer's display name, profile permalink, review id, photo ids and words.
+  All of it is now replaced with obvious placeholders — the checks read the
+  structure of a review, not the person — and a new guard fails the suite if
+  any of it arrives with a future capture. Found while reviewing what going
+  public would actually expose.
 - **The pyppeteer import was inside the launch path**, so `puppeteer_scraper`
   imported cleanly with no pyppeteer installed at all. That made the offline
   suite's skip reporting — and therefore CI's "fail on any skip" guard —

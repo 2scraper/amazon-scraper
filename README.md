@@ -430,7 +430,7 @@ says something about our own two snapshots, not about Amazon. Same for
 ## Testing
 
 ```bash
-python3 smoke_test.py     # 239 offline checks, no network, no browser
+python3 smoke_test.py     # 244 offline checks, no network, no browser
 pytest                    # the same suite, as one test
 python3 env_config.py     # what configuration was picked up (prints no secrets)
 ```
@@ -440,13 +440,20 @@ The offline suite passes with no engine library installed at all, and
 and fails if anything reports skipped, because "skipped, engine absent" reads
 identically to a passing run.
 
-Its fixtures are real captures with `<script>`/`<style>` stripped and nothing
-else changed — the parser produces identical rows from the trimmed and
-untrimmed forms, which is checked before they are committed. Exactly one
-fixture is not a capture: Amazon's image captcha page, written from its
-documented markup because no run during development was ever served one. That
-is stated in the file, and it means the captcha **solve** path is unproven
-against the live site.
+Its fixtures are real captures with `<script>`/`<style>` stripped — the parser
+produces identical rows from the trimmed and untrimmed forms, which is checked
+before they are committed. Two exceptions, both stated in the file itself:
+
+* Amazon's image captcha page is **written from its documented markup**,
+  because no run during development was ever served one — which is also why
+  the captcha *solve* path is unproven against the live site.
+* The review fixture is **anonymised**. A real capture of a review carries a
+  real customer's display name, profile permalink, review id and words, and
+  republishing those inside a public repo is a different act from Amazon
+  showing them on its own page. Those fields hold obvious placeholders;
+  everything Amazon generates around them is untouched, because that is what
+  the checks read. A guard in the suite fails if a session id, a CSRF token or
+  a real account id ever arrives with a future capture.
 
 Two workflows: `tests.yml` is offline only and never touches amazon.com or a
 credential; `canary.yml` runs one real 3-page listing daily and asserts
