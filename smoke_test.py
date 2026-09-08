@@ -1246,7 +1246,6 @@ def test_engines(skips):
     # flags, so a script can switch engines without rewriting its arguments.
     flag_sets = {}
     for name, mod in loaded.items():
-        parser = mod.parse_args.__wrapped__ if hasattr(mod.parse_args, "__wrapped__") else None
         # parse_args() reads sys.argv, so the flags are read out of the
         # source rather than by building the parser.
         flag_sets[name] = set(re.findall(r'add_argument\("(--[a-z-]+)"',
