@@ -61,17 +61,41 @@ def parse_proxy_line(line: str, source: str = "<arg>") -> Optional[str]:
     if not line or line.startswith("#"):
         return None
 
+    # Every message below reports mask(line), never the line itself. These
+    # strings hold a password, and an error message is a log: a CI run
+    # printed a live proxy login and password into its own public log this
+    # way, from a traceback nobody expected to carry a credential.
+    shown = mask(line)
     parsed = urlparse(line)
     if parsed.scheme not in _SUPPORTED_SCHEMES:
         raise ProxyError(
-            f"{source}: {line!r} — scheme must be one of "
+            f"{source}: {shown!r} — scheme must be one of "
             f"{', '.join(_SUPPORTED_SCHEMES)} (got {parsed.scheme or 'none'}). "
             f"A bare host:port is not enough; write http://host:port.")
     if not parsed.hostname:
-        raise ProxyError(f"{source}: {line!r} — no host in that URL.")
+        raise ProxyError(f"{source}: {shown!r} — no host in that URL.")
+    # The PORT is validated here and not left to the first caller that reads
+    # it. `urlparse` does not parse a port until you ask for one, and then it
+    # raises ValueError — so a malformed entry sailed through this function
+    # and blew up much later inside to_playwright as an uncaught traceback:
+    # exit 1 (crash) where it should have been exit 2 (bad usage), with no
+    # message saying what was wrong with the value.
+    #
+    # The value that caused it is worth knowing, because it is the mistake a
+    # new user makes: a line from a proxy LIST FILE
+    # ("http://host:port:login:password") pasted where a proxy URL belongs.
+    # The extra colons become part of the port.
+    try:
+        parsed.port
+    except ValueError:
+        raise ProxyError(
+            f"{source}: {shown!r} — the port is not a number. If you copied "
+            f"this from a proxy list file, that format is "
+            f"scheme://host:port:login:password and this expects a URL: "
+            f"http://login:password@host:port") from None
     if parsed.scheme == "socks5" and (parsed.username or parsed.password):
         raise ProxyError(
-            f"{source}: {line!r} — Chromium cannot authenticate a SOCKS5 "
+            f"{source}: {shown!r} — Chromium cannot authenticate a SOCKS5 "
             f"proxy, so credentials here would be silently dropped. Use an "
             f"http:// entry for an authenticated proxy.")
     return line
@@ -95,14 +119,35 @@ def mask(url: Optional[str]) -> str:
 
     Host and port stay visible on purpose — knowing WHICH exit a run used is
     the whole point of a rotation log, and it is not the secret.
+
+    THIS FUNCTION MUST NEVER RAISE. It is the last thing standing between a
+    password and a log, and it is called precisely when something is already
+    wrong with the value. An earlier version read `parsed.port`, which
+    `urlparse` computes lazily and which raises ValueError on a malformed
+    authority — so the masker blew up on exactly the input that most needed
+    masking, and the caller printed the raw string instead. That is how a
+    live proxy login and password reached a public CI log.
+
+    Anything it cannot take apart is redacted whole rather than echoed.
     """
     if not url:
         return "(none)"
-    parsed = urlparse(url)
-    host = parsed.hostname or "?"
-    port = f":{parsed.port}" if parsed.port else ""
-    creds = "***:***@" if (parsed.username or parsed.password) else ""
-    return f"{parsed.scheme}://{creds}{host}{port}"
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname or "?"
+        # `parsed.port` raises on a malformed authority; the raw netloc is
+        # not safe to fall back to, because that is where the password is.
+        try:
+            port = f":{parsed.port}" if parsed.port else ""
+        except ValueError:
+            port = ":?"
+        creds = "***:***@" if (parsed.username or parsed.password) else ""
+        scheme = parsed.scheme or "?"
+        return f"{scheme}://{creds}{host}{port}"
+    except Exception:  # noqa: BLE001 — a masker that raises is worse than a
+        # vague one. Something is already wrong with this value; say so
+        # without repeating it.
+        return "(unparseable proxy URL, redacted)"
 
 
 def to_playwright(url: Optional[str]) -> Optional[dict]:
@@ -154,7 +199,28 @@ class ProxyPool:
             raise ProxyError("a proxy pool needs at least one entry")
         if rotate not in ROTATE_MODES:
             raise ProxyError(f"rotate must be one of {ROTATE_MODES}, got {rotate!r}")
-        self._proxies = list(proxies)
+        # Duplicates are dropped, order preserved. A pool is a set of EXITS,
+        # and repeating one does not make it two: a list of fifty identical
+        # entries — which is what a copied-and-pasted proxy list often is —
+        # reported "exit 2/50" on every rotation while every one of them left
+        # from the same address, and the single-exit warning below never
+        # fired because it counted entries. A user then believes a run is
+        # spread over fifty addresses when it is burning one.
+        #
+        # Said out loud rather than done silently: a pool quietly smaller
+        # than the file that produced it is the same kind of surprise.
+        seen, unique = set(), []
+        for entry in proxies:
+            if entry not in seen:
+                seen.add(entry)
+                unique.append(entry)
+        if len(unique) < len(proxies):
+            logger.warning(
+                "Proxy pool: %d entries collapsed to %d distinct exit(s) — "
+                "%d duplicate(s) dropped. Repeating an address does not "
+                "spread a run across more of them.",
+                len(proxies), len(unique), len(proxies) - len(unique))
+        self._proxies = unique
         if shuffle:
             # Two runs started at the same minute otherwise hammer the same
             # first exit in the list.
