@@ -19,8 +19,12 @@ RUN pip install --no-cache-dir -r requirements.txt -r requirements-playwright.tx
     # not pip packages, so this has to run as a separate, explicit step.
     && playwright install --with-deps chromium
 
+# Every module the entrypoint imports, transitively. This list had fallen
+# behind: proxy_pool.py was missing while the engine imports it at module
+# level, so the image died with ModuleNotFoundError on every invocation,
+# `--help` included. Nothing noticed, because CI never built the image.
 COPY captcha_solver.py env_config.py fingerprint_client.py output_writer.py \
-     page_flow.py playwright_scraper.py product_parser.py diff_runs.py ./
+     page_flow.py playwright_scraper.py product_parser.py diff_runs.py proxy_pool.py ./
 
 ENTRYPOINT ["python3", "playwright_scraper.py"]
 CMD ["--help"]
