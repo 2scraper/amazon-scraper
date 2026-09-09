@@ -42,6 +42,24 @@ import requests
 
 logger = logging.getLogger("captcha_solver")
 
+
+# An API key must never reach a log, and the easiest way for one to get there
+# is an exception message. `requests` puts the FULL URL — query string and all
+# — into the text of HTTPError and of every connection error, so any endpoint
+# that takes its key as a query parameter leaks it the moment something goes
+# wrong. That is not hypothetical: a 400 from the fingerprint endpoint printed
+# a live key to a terminal, which is what prompted this.
+#
+# The endpoint and the status survive redaction, because which call failed is
+# the useful half and is not the secret.
+_KEY_IN_TEXT_RE = re.compile(
+    r"((?:client)?key|token|api[_-]?key)=([^&\s'\"]{6,})", re.IGNORECASE)
+
+
+def _redact(text) -> str:
+    return _KEY_IN_TEXT_RE.sub(r"\1=***", str(text))
+
+
 # 2captcha has two generations of solver API and both are live.
 #
 #   v2 (current, documented at https://2captcha.com/api-docs):
@@ -535,9 +553,15 @@ def _solve_with_2captcha_v1(api_key: str, challenge: CaptchaChallenge,
     while waited < max_wait:
         time.sleep(poll_interval)
         waited += poll_interval
-        result = requests.get(TWOCAPTCHA_RES_URL, params={
-            "key": api_key, "action": "get", "id": task_id, "json": 1,
-        }, timeout=30).json()
+        try:
+            # The v1 result endpoint takes the key as a QUERY parameter, so a
+            # connection error here would otherwise put it in the log.
+            result = requests.get(TWOCAPTCHA_RES_URL, params={
+                "key": api_key, "action": "get", "id": task_id, "json": 1,
+            }, timeout=30).json()
+        except requests.RequestException as exc:
+            raise RuntimeError("2captcha polling request failed: %s"
+                               % _redact(exc)) from None
         if result.get("status") == 1:
             logger.info("2captcha.com solved the reCAPTCHA v3 challenge.")
             return result["request"]
