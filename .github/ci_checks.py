@@ -53,7 +53,13 @@ CREDENTIALLED_URL = re.compile(r"(?:ws|wss|https?)://[^\s\"'/]+:[^\s\"'/]+@")
 
 # Documented placeholders, which are supposed to look like the real thing.
 CREDENTIAL_ALLOWED = ("USER:PASS", "user:pass", "ACCOUNT:PASSWORD", "{login}",
-                      "***", "password}@", "u:p@h", "LOGIN:PASSWORD")
+                      "***", "password}@", "u:p@h", "LOGIN:PASSWORD",
+                      # These were missing, which is why `--all` failed on
+                      # this repo's own main: this file matches `http://` as
+                      # well as `ws://`, and the documentation and masking
+                      # fixtures use `http://` placeholders. A check that
+                      # fails on its own repository is one nobody can read.
+                      "{user}", "user:secret@", "login:password@host:port", "myuser:s3cr3t@", "u:supersecret@", "login:supersecret@", "u:pass@h1", "u:pass@h2")
 
 # A 2captcha API key is a 32-character hex string.
 HEX32 = re.compile(r"\b[0-9a-f]{32}\b")
