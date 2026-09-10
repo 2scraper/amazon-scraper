@@ -1302,8 +1302,21 @@ def parse_args():
                         "API and apply it to the launched browser. Needs "
                         "--twocaptcha-key. Ignored with --cdp-endpoint, where the "
                         "Scraping Browser supplies its own.")
-    p.add_argument("--fp-tags", default="Windows,Chrome,Desktop",
-                   help="Fingerprint filter tags (default: Windows,Chrome,Desktop)")
+    # ONE OS-family tag, not a list — and this default is what makes
+    # --fingerprint work at all. It shipped as "Windows,Chrome,Desktop",
+    # which the fingerprint API rejects with HTTP 400 ("Request parameters
+    # are invalid"), so --fingerprint failed on every invocation.
+    #
+    # fingerprint_client.py's own --tags help has said so all along; the
+    # engines' default contradicted it. Measured against the live API on
+    # 2026-09-10: `Windows` succeeds, and `Windows,Chrome,Desktop`,
+    # `Chrome` and `Desktop` each 400.
+    p.add_argument("--fp-tags", default="Windows",
+                   help="ONE OS-family tag for the fingerprint filter: "
+                        "Windows, Microsoft Windows or Android. NOT a list — "
+                        "Chrome, Desktop and Mobile are each rejected by the "
+                        "API with 400, and no combination is accepted. Use "
+                        "--fp-country to narrow further. (default: Windows)")
     p.add_argument("--fp-country", default=None,
                    help="Fingerprint country, ISO 3166-1 alpha-2. Match it to "
                         "your proxy's exit country — a US fingerprint on a "
