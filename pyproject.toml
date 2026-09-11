@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "amazon-scraper"
-version = "0.1.1"
+version = "0.1.2"
 description = "Amazon scraper: search results, best-seller grids, product pages and public reviews, across 21 marketplaces."
 readme = "README.md"
 license = "MIT"

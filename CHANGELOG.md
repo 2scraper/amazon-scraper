@@ -8,6 +8,31 @@ CLI toolkit can. Read a **patch** as "fixes" rather than as a promise that
 every flag and default is frozen: a default that changes behaviour can ship in
 one, and when it does the release notes say so first.
 
+## [0.1.2] — 2026-09-11
+
+### Fixed
+
+- **`--fingerprint` dropped `deviceScaleFactor`, so the identity
+  contradicted itself.** `playwright_context_kwargs` mapped the user agent,
+  the locale, the timezone and the screen onto the browser context and
+  ignored the scale factor the fingerprint API returns beside them. Measured
+  2026-09-11 against the live API and a live browser: a fingerprint stating
+  `deviceScaleFactor: 1.25` produced a browser reporting
+  `window.devicePixelRatio === 1` — the paid identity saying one thing and
+  the browser another, on every run, silently, on an axis any fingerprinter
+  reads for free. Playwright takes it as its own context option, so the fix
+  is to pass it; verified in a live browser both ways and pinned in the
+  offline suite.
+
+- **This repo had no check for fingerprint APPLICATION at all**, which is how
+  the defect above survived here. The new test covers the user agent, the
+  locale, the timezone and the viewport as well as the scale factor.
+
+  Found while auditing a new sibling repo against the family notes. All five
+  repos in this family had it.
+
+---
+
 ## [0.1.1] — 2026-09-09
 
 Everything here landed after `v0.1.0` was tagged, so the 0.1.0 artifact does
@@ -115,5 +140,6 @@ scrapers. **Nothing from the previous code is source- or output-compatible.**
   during development was served one; it is exercised only by an offline
   fixture written from Amazon's documented markup.
 
+[0.1.2]: https://github.com/2scraper/amazon-scraper/releases/tag/v0.1.2
 [0.1.1]: https://github.com/2scraper/amazon-scraper/releases/tag/v0.1.1
 [0.1.0]: https://github.com/2scraper/amazon-scraper/releases/tag/v0.1.0
