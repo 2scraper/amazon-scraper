@@ -241,6 +241,20 @@ def playwright_context_kwargs(fp: dict) -> dict:
         kwargs["viewport"] = {"width": outer_w, "height": max(400, outer_h)}
         kwargs["screen"] = {"width": width, "height": height}
 
+    # The device pixel ratio, which Playwright takes as its own context
+    # option and which was previously dropped on the floor. Measured
+    # 2026-09-11 against the live API and a live browser: a fingerprint
+    # stating `deviceScaleFactor: 1.25` produced a browser reporting
+    # `window.devicePixelRatio === 1`, so the identity contradicted itself
+    # on an axis any fingerprinter reads for free -- and a contradiction is
+    # exactly what this flag exists to avoid. Same shape as the three
+    # defects the family notes already list for this file: a key the API
+    # returns that nothing applies. Found by comparing a live browser
+    # against the fingerprint rather than by reading the code.
+    scale = (fp.get("screen") or {}).get("deviceScaleFactor")
+    if isinstance(scale, (int, float)) and not isinstance(scale, bool) and scale > 0:
+        kwargs["device_scale_factor"] = float(scale)
+
     intl = fp.get("intl") or {}
     # The fingerprint's OWN locale. This used to be built as
     # f"en-{country}", which produced "en-DE" for a German fingerprint — an

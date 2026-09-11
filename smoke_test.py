@@ -1417,6 +1417,46 @@ def test_ci_checks_is_actually_wired_up():
     ok &= check("...and carries no second, narrower inline credential grep",
                 "(ws|wss)://[^ " not in wf)
 
+    # THE FINGERPRINT IS APPLIED, not merely fetched. This repo had no
+    # check for that at all, which is how the gap below survived: the client
+    # mapped the user agent, the locale, the timezone and the screen onto the
+    # context and dropped `deviceScaleFactor` on the floor, so a fingerprint
+    # stating 1.25 produced a browser reporting `devicePixelRatio === 1` --
+    # an identity contradicting itself on an axis a fingerprinter reads for
+    # free. Measured against the live API and a live browser on 2026-09-11,
+    # in a sibling repo, and found in this one by the same comparison.
+    import fingerprint_client as _fpc
+    fp = {
+        "id": 1000000,
+        "country": "US",
+        "userAgent": {
+            "userAgent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/146.0.0.0 Safari/537.36"),
+            "platform": "Windows",
+            "mobile": False,
+        },
+        "intl": {"contentLocale": "en-US",
+                 "languages": ["en-US", "en"],
+                 "timeZone": "America/New_York"},
+        "screen": {"width": 1920, "height": 1080,
+                   "outerWidth": 1920, "outerHeight": 992,
+                   "deviceScaleFactor": 1.25},
+    }
+    kw = _fpc.playwright_context_kwargs(fp)
+    ok &= check("fingerprint: the user agent is the fingerprint's own",
+                kw.get("user_agent") == fp["userAgent"]["userAgent"])
+    ok &= check("fingerprint: the locale is the fingerprint's own, "
+                "not en-<country>", kw.get("locale") == "en-US")
+    ok &= check("fingerprint: the timezone is carried, so the browser "
+                "cannot contradict it",
+                kw.get("timezone_id") == "America/New_York")
+    ok &= check("fingerprint: the viewport is the window, not the screen",
+                kw.get("viewport", {}).get("height") == 992
+                and kw.get("screen", {}).get("height") == 1080)
+    ok &= check("fingerprint: the device scale factor is carried",
+                kw.get("device_scale_factor") == 1.25)
+
     # `--fp-tags` MUST DEFAULT TO ONE OS-FAMILY TAG. It shipped as
     # "Windows,Chrome,Desktop", which the fingerprint API rejects with HTTP
     # 400 — so --fingerprint failed on every invocation, while
