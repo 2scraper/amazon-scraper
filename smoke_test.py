@@ -1325,6 +1325,55 @@ def test_no_capture_leaks():
     return ok
 
 
+def test_fingerprint_client_reads_env():
+    group("fingerprint_client resolves its key the way the docs promise")
+    ok = True
+    import fingerprint_client as fpc
+
+    # THE DEFECT THIS PINS, found the first time --fingerprint was run live
+    # here and confirmed present in five sibling repos: `--key` defaulted to
+    # `os.environ.get("TWOCAPTCHA_KEY")` alone. So a key put in `.env` —
+    # which is exactly what §3, the README and .env.example instruct — worked
+    # for every engine and failed HERE with "No API key". A documented
+    # mechanism not applied on one path, which is the shape of half the
+    # defects §16 lists.
+    src = inspect.getsource(fpc.main)
+    ok &= check("it loads .env itself, rather than hoping an engine did",
+                "env_config.load_env()" in src)
+    ok &= check("...and reads the key through the family's loader",
+                'env_config.env_value("TWOCAPTCHA_KEY")' in src)
+    # Through `env_value` and NOT `os.environ.get`, because only the former
+    # applies the placeholder rule. Measured both ways with
+    # TWOCAPTCHA_KEY=your_2captcha_api_key_here exported: os.environ.get
+    # sends the placeholder to the API and the run reports "Fingerprint API
+    # rejected the key (401) — note this is a separate subscription", which
+    # sends the reader to check a subscription they never needed.
+    ok &= check("...not straight from os.environ, which skips the "
+                "placeholder rule",
+                'os.environ.get("TWOCAPTCHA_KEY")' not in src)
+    # Behaviourally, not just by reading the source — and written
+    # self-contained so this check is byte-identical in every repo of the
+    # family rather than depending on a local helper.
+    saved = os.environ.get("TWOCAPTCHA_KEY")
+    try:
+        os.environ["TWOCAPTCHA_KEY"] = "your_2captcha_api_key_here"
+        read_back = env_config.env_value("TWOCAPTCHA_KEY")
+    finally:
+        if saved is None:
+            os.environ.pop("TWOCAPTCHA_KEY", None)
+        else:
+            os.environ["TWOCAPTCHA_KEY"] = saved
+    ok &= check("a placeholder still reads as unset on this path",
+                read_back is None)
+
+    # The default must never reach `--help`. argparse prints a default only
+    # when the help string asks for it, so this is one substring away from
+    # printing a live credential to anyone who types --help.
+    ok &= check("the --key help text does not interpolate its default",
+                "%(default)s" not in src)
+    return ok
+
+
 def test_wording():
     group("wording")
     ok = True
@@ -1505,6 +1554,7 @@ def main() -> int:
     ok &= test_engines(skips)
     ok &= test_no_capture_leaks()
     ok &= test_ci_checks_is_actually_wired_up()
+    ok &= test_fingerprint_client_reads_env()
     ok &= test_wording()
     ok &= test_sample_output()
 

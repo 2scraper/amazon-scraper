@@ -72,6 +72,8 @@ from typing import Optional
 
 import requests
 
+import env_config
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("fingerprint_client")
 
@@ -325,8 +327,28 @@ def playwright_init_script(fp: dict) -> str:
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Fetch a browser fingerprint from 2captcha")
-    p.add_argument("--key", default=os.environ.get("TWOCAPTCHA_KEY"),
-                   help="API key. Defaults to $TWOCAPTCHA_KEY (safer than argv).")
+    # Reads `.env` as well as the exported variable, through the family's own
+    # loader. It used to read `os.environ` alone, which meant a key put in
+    # `.env` exactly as the README and .env.example instruct worked for every
+    # engine and failed HERE with "No API key" — a documented mechanism not
+    # applied on one path, which is the shape of half the defects §16 lists.
+    #
+    # `.env` has to be LOADED before it can be read: `env_value` looks at
+    # os.environ, and `load_env` is what fills that from the file. Calling it
+    # here rather than relying on an engine having called it is the whole
+    # point — this is a standalone entry point.
+    #
+    # And it goes through `env_value` rather than `os.environ.get` so the
+    # PLACEHOLDER rule applies. Measured both ways: with
+    # TWOCAPTCHA_KEY=your_2captcha_api_key_here exported, `os.environ.get`
+    # sends the placeholder to the API and the run reports "Fingerprint API
+    # rejected the key (401) — note this is a separate subscription", which
+    # sends the reader off to check a subscription when they simply never
+    # filled the key in. `env_value` says so instead, by name.
+    env_config.load_env()
+    p.add_argument("--key", default=env_config.env_value("TWOCAPTCHA_KEY"),
+                   help="API key. Defaults to TWOCAPTCHA_KEY from the "
+                        "environment or .env (safer than argv).")
     # Measured against the live API on 2026-09-09, because the example this
     # file used to carry ("Windows,Chrome,Desktop") returns 400 every time:
     #   accepted -> Windows, Microsoft Windows, Android
