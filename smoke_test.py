@@ -35,6 +35,7 @@ Exits non-zero on any failure.
 """
 
 import ast
+import importlib
 import inspect
 import json
 import os
@@ -1403,6 +1404,116 @@ def test_wording():
     return ok
 
 
+def test_shared_calls_bind_against_the_real_signature():
+    """§17's check #1: bind every call into a shared module against the
+    callee's real signature.
+
+    This exists because of a defect that no other check in this suite can
+    see. A sibling repo shipped `classify(html, url=…)` in two of three
+    engines against a callee whose second parameter is `status`, and BOTH
+    crashed on their FIRST fetch — invisible to import, `--help`,
+    `compileall`, the undefined-name walk and several hundred green
+    assertions, because none of those calls a function the way a live run
+    does.
+
+    Two failure modes, and the second is the one a weaker version of this
+    check swallows: a call whose arguments do not fit the signature, and a
+    call to a name the shared module **does not define at all**. Another
+    repo in this family resolved the callee with `getattr(..., None)` and
+    skipped whatever came back not-callable, so three calls into an API that
+    did not exist sat under a green run of its own binding check. Absent is
+    the loudest failure available, not "nothing to bind".
+
+    Deliberately conservative: a call using `*args` or `**kwargs` is skipped
+    rather than guessed at, so this under-reports and never invents a
+    problem.
+    """
+    group("every call into a shared module binds against its real signature")
+    ok = True
+    shared = {}
+    for name in ("product_parser", "output_writer", "page_flow", "proxy_pool",
+                 "captcha_solver", "env_config", "scraper_api_client",
+                 "fingerprint_client"):
+        if os.path.exists(os.path.join(REPO_ROOT, name + ".py")):
+            try:
+                shared[name] = importlib.import_module(name)
+            except Exception as exc:                       # noqa: BLE001
+                ok &= check("%s imports (%r)" % (name, exc), False)
+
+    callers = [e + ".py" for e in ENGINES]
+    callers += [n for n in ("page_flow.py", "product_parser.py",
+                            "scraper_api_client.py")
+                if os.path.exists(os.path.join(REPO_ROOT, n))]
+    checked = 0
+    for filename in callers:
+        path = os.path.join(REPO_ROOT, filename)
+        if not os.path.exists(path):
+            continue
+        tree = ast.parse(open(path, encoding="utf-8").read())
+
+        # Names bound anywhere in this file shadow a same-named module: an
+        # engine takes `proxy_pool` as a PARAMETER, and `proxy_pool.next()`
+        # on that parameter is a method call, not a module attribute.
+        bound = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                bound.add(node.id)
+            elif isinstance(node, ast.arg):
+                bound.add(node.arg)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                bound.add(node.name)
+
+        direct = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module in shared and not node.level:
+                for alias in node.names:
+                    direct[alias.asname or alias.name] = (node.module, alias.name)
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            target = None
+            if isinstance(node.func, ast.Name) and node.func.id in direct:
+                target = direct[node.func.id]
+            elif (isinstance(node.func, ast.Attribute)
+                  and isinstance(node.func.value, ast.Name)
+                  and node.func.value.id in shared
+                  and node.func.value.id not in bound):
+                target = (node.func.value.id, node.func.attr)
+            if target is None:
+                continue
+            module_name, attr = target
+            module = shared[module_name]
+            if not hasattr(module, attr):
+                ok &= check("%s:%d calls %s.%s, which does not exist — a "
+                            "live run reaches this as AttributeError"
+                            % (filename, node.lineno, module_name, attr),
+                            False)
+                continue
+            callee = getattr(module, attr)
+            if not (inspect.isfunction(callee) or inspect.isclass(callee)):
+                continue
+            if (any(isinstance(a, ast.Starred) for a in node.args)
+                    or any(k.arg is None for k in node.keywords)):
+                continue                      # unpacking: cannot bind statically
+            try:
+                signature = inspect.signature(callee)
+            except (TypeError, ValueError):
+                continue
+            try:
+                signature.bind(*([inspect.Parameter.empty] * len(node.args)),
+                               **{k.arg: inspect.Parameter.empty
+                                  for k in node.keywords})
+            except TypeError as exc:
+                ok &= check("%s:%d %s.%s%s — %s"
+                            % (filename, node.lineno, module_name, attr,
+                               signature, exc), False)
+            else:
+                checked += 1
+    ok &= check("...and there were calls to bind (%d)" % checked, checked > 10)
+    return ok
+
+
 def test_sample_output():
     group("shipped sample output")
     ok = True
@@ -1556,6 +1667,7 @@ def main() -> int:
     ok &= test_ci_checks_is_actually_wired_up()
     ok &= test_fingerprint_client_reads_env()
     ok &= test_wording()
+    ok &= test_shared_calls_bind_against_the_real_signature()
     ok &= test_sample_output()
 
     print()

@@ -10,6 +10,19 @@ one, and when it does the release notes say so first.
 
 ## [Unreleased]
 
+### Added
+
+- **A check that binds every call into a shared module against the callee's
+  real signature** (§17's check #1), which this repo did not have. It catches
+  two things nothing else here can: a call whose arguments do not fit the
+  signature, and a call to a name the shared module does not define at all —
+  both of which reach a live run as a crash on the first fetch while import,
+  `--help`, `compileall` and the undefined-name walk all stay green. It skips
+  calls using `*args`/`**kwargs` rather than guessing, treats a locally-bound
+  name as shadowing a same-named module, and asserts it found calls to bind
+  at all so it cannot pass by scanning nothing. Verified by control.
+
+
 ### CI
 
 - **The Docker image is now built in CI.** Nothing built it before, which is
