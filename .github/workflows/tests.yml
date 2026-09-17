@@ -208,3 +208,52 @@ jobs:
 
       - name: The ${{ matrix.engine }} CLI answers --help
         run: .venv/bin/python ${{ matrix.engine }}_scraper.py --help >/dev/null
+
+  docker:
+    # Nothing else in this repo builds the image, which is how all three of
+    # the older repos in this family shipped one that died with
+    # ModuleNotFoundError on every invocation, `--help` included: the
+    # Dockerfile COPYs an explicit list (right -- the image should carry no
+    # test suite and no stray .env) and the list fell behind the imports.
+    # Four steps, each for a distinct failure. Under a minute.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        # Plain `docker build`, no registry and no push: the point is that the
+        # Dockerfile still builds, not that anything is published.
+        run: docker build -t amazon-scraper:ci .
+
+      - name: The entrypoint runs inside the image
+        # Its CMD is --help, so a bare `run` exercises the default path. This
+        # is the invocation a missing module breaks.
+        run: docker run --rm amazon-scraper:ci
+
+      - name: Chromium is actually installed in the image
+        # `playwright install --with-deps` is the layer this job exists to
+        # prove, so check the browser is there rather than trusting that the
+        # layer exited 0.
+        run: |
+          docker run --rm --entrypoint python3 amazon-scraper:ci -c "
+          from playwright.sync_api import sync_playwright
+          with sync_playwright() as p:
+              b = p.chromium.launch()
+              print('chromium', b.version)
+              b.close()"
+
+      - name: The image carries no credentials and no test material
+        # It COPYs an explicit list precisely so that it does not. Verify
+        # rather than assume: a .env baked into an image is a credential
+        # published to everyone who can pull it.
+        run: |
+          set -e
+          found=0
+          for f in .env smoke_test.py tests sample_output.json; do
+            if docker run --rm --entrypoint sh amazon-scraper:ci -c "test -e /app/$f"; then
+              echo "::error::$f is inside the image and should not be"
+              found=1
+            fi
+          done
+          test "$found" = "0"
+          echo "no .env, no test suite, no fixtures in the image"

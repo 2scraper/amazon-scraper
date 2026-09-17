@@ -8,6 +8,40 @@ CLI toolkit can. Read a **patch** as "fixes" rather than as a promise that
 every flag and default is frozen: a default that changes behaviour can ship in
 one, and when it does the release notes say so first.
 
+## [Unreleased]
+
+### Added
+
+- **A check that binds every call into a shared module against the callee's
+  real signature** (§17's check #1), which this repo did not have. It catches
+  two things nothing else here can: a call whose arguments do not fit the
+  signature, and a call to a name the shared module does not define at all —
+  both of which reach a live run as a crash on the first fetch while import,
+  `--help`, `compileall` and the undefined-name walk all stay green. It skips
+  calls using `*args`/`**kwargs` rather than guessing, treats a locally-bound
+  name as shadowing a same-named module, and asserts it found calls to bind
+  at all so it cannot pass by scanning nothing. Verified by control.
+
+
+### CI
+
+- **The Docker image is now built in CI.** Nothing built it before, which is
+  exactly how three repos in this family shipped an image that died with
+  `ModuleNotFoundError` on every invocation, `--help` included — the
+  Dockerfile COPYs an explicit list, which is right, and the list fell behind
+  the imports. Four steps, each for a distinct failure: the image builds; its
+  entrypoint runs (the `CMD` is `--help`, the invocation a missing module
+  breaks); Chromium really launches, rather than the `playwright install
+  --with-deps` layer merely exiting 0; and the image contains no `.env`, no
+  test suite and no fixtures, because a `.env` baked into an image is a
+  credential published to everyone who can pull it.
+- **`claude.yml` pins the CLI to the `stable` channel.** The fix had already
+  landed in `claude-code-review.yml` in this repo and never reached its twin,
+  so `claude.yml` still let the action install `latest` — the release that on
+  2026-09-08 installed no binary where the action looks, failing every run
+  with "Claude Code native binary not found". The channel is pinned rather
+  than a version, so a fixed upstream release needs no edit here.
+
 ## [0.1.3] — 2026-09-11
 
 ### Fixed

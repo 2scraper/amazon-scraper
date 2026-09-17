@@ -42,11 +42,34 @@ jobs:
         with:
           fetch-depth: 1
 
+      # Pin the CLI to the `stable` channel rather than letting the action
+      # install `latest`. On 2026-09-08 `latest` (2.1.265) installed no binary
+      # where the action looks, so every run died with "Claude Code native
+      # binary not found at ~/.local/bin/claude". `stable` is upstream's own
+      # known-good pointer, so this pins away from a broken release WITHOUT
+      # hardcoding a version: when upstream promotes a newer stable, this
+      # picks it up with no edit here.
+      #
+      # Remove both this step and path_to_claude_code_executable once `latest`
+      # installs correctly again.
+      - name: Install Claude Code (stable channel)
+        if: env.HAS_CLAUDE_TOKEN == 'true'
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash -s stable
+          "$HOME/.local/bin/claude" --version
+          # Through GITHUB_ENV, not `${{ env.HOME }}`: HOME is a runner
+          # variable and is not in the workflow `env` context, so the
+          # expression form expands to an empty string and the action falls
+          # back to installing `latest` — the very thing this step exists to
+          # avoid, and silently.
+          echo "CLAUDE_BIN=$HOME/.local/bin/claude" >> "$GITHUB_ENV"
+
       - name: Run Claude Code
         id: claude
         if: env.HAS_CLAUDE_TOKEN == 'true'
         uses: anthropics/claude-code-action@v1
         with:
+          path_to_claude_code_executable: ${{ env.CLAUDE_BIN }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 
           # This is an optional setting that allows Claude to read CI results on PRs
