@@ -68,12 +68,49 @@ HEX32_ALLOWED = ("sha", "hash", "nonce", "example", "md5", "digest", "checksum")
 SCANNED_SUFFIXES = (".py", ".md", ".txt", ".yml", ".yaml", ".example")
 
 
+# A directory holding `pyvenv.cfg` is a virtualenv, whatever it is called.
+#
+# Structural rather than by name, and that was measured rather than reasoned:
+# a clean clone set up the way the README says puts a virtualenv in the
+# working tree, and a scan that skips only the names it happens to know walks
+# into pip's vendored code and flags a 32-hex string in `_elffile.py` as
+# key-shaped. Correct about the string, wrong about the file — and it is the
+# FIRST thing a new user sees from `python3 smoke_test.py`. A guard people
+# have to argue with is one they learn to suppress (CLAUDE.md §22).
+#
+# Deliberately NOT a narrowing of what gets scanned: an untracked file is
+# still read, because a key pasted into a scratch file beside the scripts is
+# exactly the case this scan exists for.
+_VENV_CACHE = {}
+
+
+def _is_in_virtualenv(path):
+    """True if any ancestor of `path` (under REPO) is a virtualenv root."""
+    for parent in path.parents:
+        try:
+            if parent == REPO.parent:
+                break
+        except Exception:
+            pass
+        cached = _VENV_CACHE.get(parent)
+        if cached is None:
+            cached = (parent / "pyvenv.cfg").is_file()
+            _VENV_CACHE[parent] = cached
+        if cached:
+            return True
+        if parent == REPO:
+            break
+    return False
+
+
 def scanned_files():
     for path in sorted(REPO.rglob("*")):
         if not path.is_file() or path.suffix not in SCANNED_SUFFIXES:
             continue
         if any(part in {".git", "__pycache__", ".venv", "venv"}
                for part in path.parts):
+            continue
+        if _is_in_virtualenv(path):
             continue
         yield path
 
