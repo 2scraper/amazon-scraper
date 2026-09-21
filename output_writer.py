@@ -516,7 +516,7 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
         # EXIT_NO_PRODUCTS.
         if blocked:
             return EXIT_BLOCKED
-        if stop_reason in FETCH_FAILURE_STOP_REASONS:
+        if not complete:
             print(f"[!] The page was never fetched ({stop_reason}) — this is "
                   f"exit {EXIT_FETCH_FAILED}, NOT an empty result "
                   f"(exit {EXIT_NO_PRODUCTS}). Nothing can be concluded about "
