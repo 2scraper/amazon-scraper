@@ -858,6 +858,14 @@ def parse_args():
     p.add_argument("--headful", dest="headless", action="store_false")
     args = p.parse_args()
     env_config.apply(args)
+    # Out-of-range numbers, before anything else uses them. Shared with the
+    # other two engines so all three refuse the same input for the same
+    # reason; see page_flow.numeric_arg_errors for what each one did before.
+    for message in page_flow.numeric_arg_errors(
+            pages=args.pages, retries=args.retries,
+            retry_delay=args.retry_delay, delay=args.delay,
+            concurrency=args.concurrency, min_score=args.min_score):
+        p.error(message)
     if not args.url:
         p.error("no --url given, and AMAZON_URL is not set in the environment "
                 "or in .env.")

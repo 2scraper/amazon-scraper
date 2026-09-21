@@ -1209,6 +1209,54 @@ def test_proxy_pool():
     return ok
 
 
+def test_numeric_arg_validation():
+    """Out-of-range numbers are refused, and refused identically everywhere.
+
+    Every value below was accepted silently before, and two of them made a
+    run report success for work it never did — see
+    page_flow.numeric_arg_errors for what each one actually did.
+    """
+    group("numeric argument validation")
+    ok = True
+    good = dict(pages=3, retries=3, retry_delay=2.0, delay=1.0,
+                concurrency=2, min_score=0.3)
+    ok &= check("a sane set of numbers produces no errors",
+                page_flow.numeric_arg_errors(**good) == [])
+
+    for field, value, word in (("pages", 0, "--pages"),
+                               ("pages", -1, "--pages"),
+                               ("retries", 0, "--retries"),
+                               ("retry_delay", -1.0, "--retry-delay"),
+                               ("delay", -0.5, "--delay"),
+                               ("concurrency", 0, "--concurrency"),
+                               ("min_score", 1.5, "--min-score"),
+                               ("min_score", -0.1, "--min-score")):
+        bad = dict(good, **{field: value})
+        errors = page_flow.numeric_arg_errors(**bad)
+        ok &= check("%s=%r is refused, and the message names the flag"
+                    % (word, value),
+                    len(errors) == 1 and word in errors[0])
+
+    # The boundary, in both directions: a min-score of exactly 0 or 1 is a
+    # legal score, and refusing it would be a defect of its own.
+    ok &= check("--min-score 0.0 and 1.0 are legal",
+                page_flow.numeric_arg_errors(**dict(good, min_score=0.0)) == []
+                and page_flow.numeric_arg_errors(**dict(good, min_score=1.0)) == [])
+    ok &= check("--pages 1 and --retries 1 are legal",
+                page_flow.numeric_arg_errors(**dict(good, pages=1, retries=1)) == [])
+
+    # And that every engine actually consults it. The signature-binding
+    # check proves a call that EXISTS is well-formed; this is the other
+    # half — that it has not been dropped from one of the three, which is
+    # how an engine quietly starts accepting input its twins refuse.
+    for name in ENGINES:
+        path = os.path.join(REPO_ROOT, name + ".py")
+        src = open(path, encoding="utf-8").read()
+        ok &= check("%s validates its numbers through the shared helper" % name,
+                    "page_flow.numeric_arg_errors(" in src)
+    return ok
+
+
 # ---------------------------------------------------------------------------
 # Engines
 # ---------------------------------------------------------------------------
@@ -1689,6 +1737,7 @@ def main() -> int:
     ok &= test_diff()
     ok &= test_captcha()
     ok &= test_page_flow()
+    ok &= test_numeric_arg_validation()
     ok &= test_env_config()
     ok &= test_proxy_pool()
     ok &= test_engines(skips)
