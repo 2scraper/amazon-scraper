@@ -52,6 +52,7 @@ from diff_runs import diff_products
 import env_config
 import page_flow
 from output_writer import (Product, Review, save, finish_run, write_csv,
+                           EXIT_FETCH_FAILED,
                            dedupe_by_key, dedupe_by_sku, run_meta,
                            ROW_CLASS_BY_MODE, EXIT_BLOCKED, EXIT_NO_PRODUCTS,
                            EXIT_PARTIAL, COMPLETE_STOP_REASONS,
@@ -846,6 +847,16 @@ def test_writers():
         (dict(blocked=False, stop_reason="no_new_products", rows=[Product(sku="A")]), 0, "complete"),
         (dict(blocked=False, stop_reason="single_page_mode", rows=[Product(sku="A")]), 0, "complete"),
         (dict(blocked=False, stop_reason="page_load_timeout", rows=[Product(sku="A")]), EXIT_PARTIAL, "partial"),
+        # The audit case: a page that was never fetched is NOT an empty
+        # result. A live run through a misconfigured proxy exited 4 here,
+        # the code that tells a pipeline the catalogue was read and was bare.
+        (dict(blocked=False, stop_reason="page_load_timeout", rows=[]), EXIT_FETCH_FAILED, None),
+        # A named challenge still outranks a transport failure: it says more.
+        (dict(blocked=True, stop_reason="page_load_timeout", rows=[]), EXIT_BLOCKED, None),
+        # And the negative half, which is what keeps the set honest:
+        # pages_unattempted means page 1 WAS fetched, so a run holding
+        # nothing under it really did find nothing.
+        (dict(blocked=False, stop_reason="pages_unattempted", rows=[]), EXIT_NO_PRODUCTS, None),
     ]
     for i, (kw, expected_rc, expected_status) in enumerate(cases):
         prefix = os.path.join(tmp, "run%d" % i)
@@ -862,6 +873,24 @@ def test_writers():
     # contradict it, and diff_runs would refuse data that is fine.
     ok &= check("a failed run writes NO sidecar",
                 not os.path.exists(os.path.join(tmp, "run0.meta.json")))
+    # ...but it must leave SOMETHING machine-readable, or the exit code is
+    # the whole story and a caller cannot tell a dead proxy from an empty
+    # search. A separate filename is what lets both facts coexist.
+    la0 = os.path.join(tmp, "run0.last_attempt.json")
+    ok &= check("a failed run DOES write <out>.last_attempt.json",
+                os.path.exists(la0))
+    if os.path.exists(la0):
+        m = json.load(open(la0))
+        ok &= check("the last-attempt manifest names the status and the reason",
+                    m["status"] == "failed"
+                    and m["stop_reason"] == "blocked_amazon-captcha")
+    # Written on a success too, so it is never a stale relic of the last
+    # failure: a manifest that only appears on failure cannot be trusted to
+    # be absent when things are fine.
+    la_ok = os.path.join(tmp, "run2.last_attempt.json")
+    ok &= check("a successful run writes it too, with status complete",
+                os.path.exists(la_ok)
+                and json.load(open(la_ok))["status"] == "complete")
     return ok
 
 

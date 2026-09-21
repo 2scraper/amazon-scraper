@@ -99,6 +99,7 @@ jobs:
             0)   echo "OK — products parsed from a live run." ;;
             3)   echo "::error::Blocked before parsing (exit 3): Amazon's image captcha, an unresolved 503 throttle, or a sign-in wall. Check canary_run.meta.json's stop_reason in the artifacts, and note this may be this runner's datacenter address rather than a site change — see AMAZON_PROXY in this workflow's header." ;;
             4)   echo "::error::Ran fine but parsed 0 rows (exit 4) on a URL known to have plenty — this is the shape a real site-side break takes." ;;
+            5)   echo "::error::The page was never fetched (exit 5) — a navigation timeout or a transport failure, NOT an empty result. This is the one exit code here that is more likely to be this runner's network than a site change; canary_run.last_attempt.json names the stop_reason." ;;
             6)   echo "::error::Partial run (exit 6) — some pages were gathered and then the run stopped early. canary_run.meta.json names which pages failed." ;;
             2)   echo "::error::Bad usage (exit 2) — the workflow's own arguments are wrong, not the site." ;;
             *)   echo "::error::Unexpected exit code $code (see the step above for the traceback)." ;;

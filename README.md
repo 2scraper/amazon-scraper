@@ -174,7 +174,7 @@ would contradict it.
 | 2 | Bad usage (including a credentialed `--cdp-endpoint` given to Selenium) |
 | 3 | Blocked before parsing: Amazon's image captcha, an unresolved throttle, or a sign-in wall |
 | 4 | Ran fine, found nothing |
-| 5 | Remote API error |
+| 5 | The page was never fetched: a navigation timeout, a dead or unauthenticated proxy, or a Scraper API error. **Not** an empty result — nothing can be concluded about the catalogue |
 | 6 | Partial: some pages gathered, then the run stopped early |
 
 Exit 3 covers the sign-in wall as well as a captcha, because the family's
@@ -184,7 +184,7 @@ keeps them apart for anyone who needs to know which it was.
 
 ### A run that finds nothing writes nothing
 
-By default, zero rows means **no file is written** and the exit code is 4.
+By default, zero rows means **no file is written** and the exit code is 4 — unless the page was never fetched at all, which is exit 5. Either way `<out>.last_attempt.json` is written with the status and the stop reason, so a failed run is readable without overwriting the last good `<out>.meta.json`.
 That is deliberate: a page-load failure that writes `[]` over last night's
 good output destroys the last known good data, and a consumer cannot tell an
 empty result from a failed run. Pass `--allow-empty` when an empty result is

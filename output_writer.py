@@ -252,6 +252,31 @@ EXIT_BLOCKED = 3
 # disappeared from the catalogue. See write_run_meta.
 EXIT_PARTIAL = 6
 
+# Exit code for a run that never GOT the page: a navigation timeout, a dead
+# or unauthenticated proxy, a DNS failure, or an edge answering with
+# something that is not the page that was asked for.
+#
+# Until this existed every one of those returned EXIT_NO_PRODUCTS, so a dead
+# proxy, a network flap and a search that genuinely matched nothing were one
+# value to an automated caller. Those want three different responses — retry
+# the same exit, change exit, accept the answer — and the caller had no way
+# to choose. Measured: a live run through a misconfigured proxy failed to
+# load for 60s and exited 4, the code documented as "ran fine, no products".
+#
+# 5 rather than a new number, and this is the part worth not re-litigating:
+# the family's exit-code contract already reserves 5 for "the transport
+# failed" (scraper_api_client has used it for a Scraper API error since it
+# was written), and the browser engines simply had no way to say the same
+# thing. Every repo in this family spells 4 as "ran, found nothing" and none
+# of them defines a 7, so widening 5 from "remote API error" to "the fetch
+# failed" keeps ONE meaning per code across the family instead of making
+# this repo the only one whose callers need a per-repo table.
+#
+# Deliberately NOT applied when rows were gathered: a timeout on page 7 of
+# 10 is a PARTIAL run (exit 6, output written), which is already right. This
+# only decides what a run holding nothing reports.
+EXIT_FETCH_FAILED = 5
+
 
 def write_run_meta(out_prefix: str, meta: dict) -> str:
     """Write a run-metadata sidecar next to the output, return its path.
@@ -268,6 +293,33 @@ def write_run_meta(out_prefix: str, meta: dict) -> str:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
     print(f"[+] Wrote run metadata -> {path} (status={meta.get('status')})")
+    return path
+
+
+def write_last_attempt(out_prefix: str, meta: dict) -> str:
+    """Record a run that wrote no output, under its OWN filename.
+
+    `finish_run` deliberately writes no `<out>.meta.json` for a failed run:
+    `save` leaves the previous good output in place, and a "failed" sidecar
+    beside good data would contradict it and make diff_runs.py refuse a
+    comparison of data that is in fact fine.
+
+    The cost of that, until this existed, was that a failed run left the
+    caller NOTHING to read — the exit code was the whole story, so "the proxy
+    died" and "the search matched nothing" were indistinguishable to anything
+    driving the scraper. A separate name is what lets both facts coexist:
+    `<out>.meta.json` keeps describing the last SUCCESSFUL output and
+    `<out>.last_attempt.json` describes the most recent attempt, whether or
+    not it produced anything.
+
+    It is overwritten every run, including successful ones, so it is never
+    stale: a `last_attempt` whose status is "complete" and whose
+    `finished_at` matches the sidecar means the last attempt is the last
+    success.
+    """
+    path = f"{out_prefix}.last_attempt.json"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
     return path
 
 
@@ -361,6 +413,25 @@ COMPLETE_STOP_REASONS = ("completed", "pagination_exhausted", "no_new_products",
                          "single_page_mode")
 
 
+# Stop reasons that mean the run never obtained the page, as opposed to
+# obtaining it and finding nothing on it. Kept as DATA next to the exit code
+# they map to, so an engine cannot invent a reason that silently falls
+# through to "no products" — the failure this list exists to prevent.
+#
+# The engines here currently only ever produce the first: a dead proxy is
+# detected (`_proxy_failure`) and rotates the exit, but it reaches the
+# sidecar as `page_load_timeout` like any other navigation failure. The other
+# two are listed anyway, spelled as the rest of the family spells them, so
+# splitting them later is a one-line change in the engine rather than a
+# silent fall-through here.
+#
+# "pages_unattempted" is deliberately NOT in this set. It is set when page 1
+# was fetched fine and the queue never drained, so a run holding no rows
+# under that reason really did get its page and really did find nothing.
+FETCH_FAILURE_STOP_REASONS = ("page_load_timeout", "proxy_unusable",
+                              "http_error")
+
+
 def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
                allow_empty: bool, *, blocked: bool, stop_reason: str,
                pages_requested: int, pages_completed: int,
@@ -383,19 +454,35 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
     rc = save(rows, out_prefix, fmt, allow_empty=allow_empty, row_cls=row_cls)
     wrote_output = bool(rows) or allow_empty
 
+    status = "complete" if (rows and complete) else (
+        "partial" if rows else "failed")
+    meta = run_meta(
+        status=status, stop_reason=stop_reason,
+        pages_requested=pages_requested, pages_completed=pages_completed,
+        pages_failed=pages_failed, mode=mode, source=source,
+        start_url=start_url, final_url=final_url, products=len(rows))
+
     if wrote_output:
-        status = "complete" if (rows and complete) else (
-            "partial" if rows else "failed")
-        write_run_meta(out_prefix, run_meta(
-            status=status, stop_reason=stop_reason,
-            pages_requested=pages_requested, pages_completed=pages_completed,
-            pages_failed=pages_failed, mode=mode, source=source,
-            start_url=start_url, final_url=final_url, products=len(rows)))
+        write_run_meta(out_prefix, meta)
+    # Always, and under its own name: see write_last_attempt for why this
+    # cannot be the same file.
+    write_last_attempt(out_prefix, meta)
 
     if not rows:
-        # Nothing gathered at all: a challenge outranks "empty result",
-        # because it says something stood between the run and the content.
-        return EXIT_BLOCKED if blocked else rc
+        # Nothing gathered at all, and the three reasons are not the same
+        # answer. Ordered by how much each one proves: a named challenge
+        # outranks a transport failure, which outranks "we got the page and
+        # it was empty" — the only one of the three that is really
+        # EXIT_NO_PRODUCTS.
+        if blocked:
+            return EXIT_BLOCKED
+        if stop_reason in FETCH_FAILURE_STOP_REASONS:
+            print(f"[!] The page was never fetched ({stop_reason}) — this is "
+                  f"exit {EXIT_FETCH_FAILED}, NOT an empty result "
+                  f"(exit {EXIT_NO_PRODUCTS}). Nothing can be concluded about "
+                  f"the catalogue from this run.")
+            return EXIT_FETCH_FAILED
+        return rc
     if not complete:
         print(f"[!] Partial run: stopped after {pages_completed} of "
               f"{pages_requested} page(s) ({stop_reason}). The output holds "
