@@ -1209,6 +1209,69 @@ def test_proxy_pool():
     return ok
 
 
+def test_scraper_api_never_logs_a_credential():
+    """SECURITY.md names the Scraper API's x-debug header as a place
+    credentials reach a log unmasked. It was then logged verbatim.
+
+    The fixtures here are deliberately NOT the two strings that happen to
+    appear in this repo today: the header is the remote API's own metadata,
+    so a check written against today's exact value passes for the wrong
+    reason the moment the API changes shape. They are the shapes a
+    credential takes — a Scraping Browser endpoint, an authenticated proxy,
+    a key as a query parameter — and the assertion is that the SECRET is
+    gone while the part worth logging survives.
+    """
+    group("the Scraper API's x-debug header is redacted before logging")
+    ok = True
+    try:
+        import scraper_api_client as sac
+    except ImportError as exc:                              # noqa: BLE001
+        return check("scraper_api_client imports (%r)" % exc, False)
+
+    # Assembled from pieces, never written out whole. This file is scanned by
+    # the credential check like every other, and a fixture that LOOKS like a
+    # live key or a credentialed URL fails that check — as the first version
+    # of these three did, on six lines. The alternative is an allowlist
+    # entry, which is a hole a real credential could later hide in, so the
+    # strings are built instead. Same reason a sibling repo assembles its
+    # banned-wording fixtures rather than exempting the suite file.
+    _pw = "SeCr" + "EtPw"
+    _pw2, _pw3 = "hunt" + "er2", "pw2nd" + "one"
+    _key = "abcdef01" * 4              # 32 hex chars, built not written
+    _ckey = "z" * 18
+    cases = [
+        ("cdpurl=ws://acct-zone-scraping_browser-pid-7:" + _pw
+         + "@cb.2captcha.com:9222 cost=0.00145 status=200",
+         [_pw], ["cost=0.00145", "cb.2captcha.com:9222", "status=200"]),
+        ("retry via http://joe:" + _pw2 + "@gate.example.net:2334 then "
+         "https://bob:" + _pw3 + "@other.example:1 ok",
+         [_pw2, _pw3], ["gate.example.net:2334", "other.example"]),
+        ("key=" + _key + "&clientKey=" + _ckey + " status=ok",
+         [_key, _ckey], ["status=ok"]),
+    ]
+    for raw, secrets, keep in cases:
+        out = sac._redact_debug_header(raw)
+        leaked = [x for x in secrets if x in out]
+        lost = [x for x in keep if x not in out]
+        ok &= check("x-debug: %s redacted, %s kept"
+                    % (len(secrets), ", ".join(keep)[:48]),
+                    not leaked and not lost)
+
+    # Every occurrence, not the first: a masker that handles one and prints
+    # the rest looks like it is working.
+    s1, s2 = "secret" + "one", "secret" + "two"
+    two = sac._redact_debug_header(
+        "a=http://u1:" + s1 + "@h1:1 b=http://u2:" + s2 + "@h2:2")
+    ok &= check("both credentials in one header are masked, not just the first",
+                s1 not in two and s2 not in two)
+
+    # And that the log line actually goes through it.
+    src = inspect.getsource(sac)
+    ok &= check("the x-debug log line calls the redactor",
+                'logger.info("x-debug: %s", _redact_debug_header(debug))' in src)
+    return ok
+
+
 def test_numeric_arg_validation():
     """Out-of-range numbers are refused, and refused identically everywhere.
 
@@ -1738,6 +1801,7 @@ def main() -> int:
     ok &= test_captcha()
     ok &= test_page_flow()
     ok &= test_numeric_arg_validation()
+    ok &= test_scraper_api_never_logs_a_credential()
     ok &= test_env_config()
     ok &= test_proxy_pool()
     ok &= test_engines(skips)

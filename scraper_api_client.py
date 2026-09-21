@@ -83,6 +83,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 import time
 from typing import Optional
@@ -118,6 +119,39 @@ def _mask_credentials(url: str) -> str:
     scheme, rest = url[:scheme_sep + 3], url[scheme_sep + 3:]
     _, _, host_part = rest.partition("@")
     return f"{scheme}***:***@{host_part}"
+
+
+# Credentials embedded ANYWHERE in a blob of text, not just in a string that
+# is entirely a URL — and every occurrence, not the first. A masker that
+# handles one occurrence prints the password the other four times and looks
+# like it is working.
+_CREDS_IN_TEXT_RE = re.compile(r"([a-z][a-z0-9+.-]*://)[^/\s'\"@]+@", re.IGNORECASE)
+# Same shape as captcha_solver._KEY_IN_TEXT_RE and fingerprint_client's. A
+# third copy is one too many and they should be unified in a family pass;
+# reaching into another module's private name to avoid it would be worse.
+_KEY_IN_TEXT_RE = re.compile(
+    r"((?:client)?key|token|api[_-]?key)=([^&\s'\"]{6,})", re.IGNORECASE)
+
+
+def _redact_debug_header(value: str) -> str:
+    """The x-debug header, safe to log.
+
+    SECURITY.md names this header as one of three places credentials reach a
+    log unmasked, and it was logged verbatim: the API echoes back the task it
+    ran, so a run driven through a credentialed `cdpurl` put that URL's
+    username and password into the log, and a key passed as a query parameter
+    would go the same way.
+
+    Redaction rather than an allowlist of fields, deliberately: the header is
+    the API's own metadata and its shape is not ours to pin, so an allowlist
+    would silently drop the cost and timing figures this is logged FOR the
+    first time the API adds a field. The trade is that a credential in a
+    shape neither pattern knows would survive — so the patterns are global
+    and the check beside them uses realistic fixtures rather than the two
+    literals that happen to appear here today.
+    """
+    return _KEY_IN_TEXT_RE.sub(r"\1=***",
+                               _CREDS_IN_TEXT_RE.sub(r"\1***:***@", value))
 
 
 def _build_wait_for(args) -> Optional[str]:
@@ -173,7 +207,7 @@ def fetch_html(args) -> str:
     # cost of the call shows up.
     debug = resp.headers.get("x-debug")
     if debug:
-        logger.info("x-debug: %s", debug)
+        logger.info("x-debug: %s", _redact_debug_header(debug))
 
     if resp.status_code != 200:
         # 422 = task ran but errored (this is what a bad/unreachable
