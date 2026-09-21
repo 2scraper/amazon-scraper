@@ -1021,10 +1021,15 @@ def test_writers():
         (dict(blocked=False, stop_reason="page_load_timeout", rows=[]), EXIT_FETCH_FAILED, None),
         # A named challenge still outranks a transport failure: it says more.
         (dict(blocked=True, stop_reason="page_load_timeout", rows=[]), EXIT_BLOCKED, None),
-        # And the negative half, which is what keeps the set honest:
-        # pages_unattempted means page 1 WAS fetched, so a run holding
-        # nothing under it really did find nothing.
-        (dict(blocked=False, stop_reason="pages_unattempted", rows=[]), EXIT_NO_PRODUCTS, None),
+        # pages_unattempted is a should-never-happen guard: page 1 was
+        # fetched and the queue never drained. It used to be pinned here at
+        # exit 4 on the reasoning that the page WAS fetched, so zero rows
+        # meant an empty listing — and that reasoning was retracted when the
+        # family unified on `not complete` rather than on a list of stop
+        # reasons. A list cannot cover a reason nobody has added to it, so
+        # the list was the hole; and for a state nobody can explain,
+        # "nothing can be concluded" beats "the listing was empty".
+        (dict(blocked=False, stop_reason="pages_unattempted", rows=[]), EXIT_FETCH_FAILED, None),
     ]
     for i, (kw, expected_rc, expected_status) in enumerate(cases):
         prefix = os.path.join(tmp, "run%d" % i)
