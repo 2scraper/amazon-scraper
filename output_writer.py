@@ -114,7 +114,28 @@ class Product:
     availability: Optional[str] = None
     bullets: Optional[List[str]] = None
     images: Optional[List[str]] = None
-    variations: Optional[List[str]] = None
+    # Variation columns, all four from the detail page's own variation state
+    # (`dimensions` / `variationDisplayLabels` / `dimensionValuesDisplayData`
+    # / `num_total_variations`) rather than from the twister's rendered
+    # markup. See product_parser._variation_state for why: the container the
+    # old `variations` column read is not on the page any more, and the one
+    # that replaced it is an empty mount point in the served HTML.
+    #
+    # Scalars rather than the whole variant table, because the table does not
+    # fit in a row: one measured product (Crocs Classic Clog, 2026-09-21)
+    # publishes 776 variants, and 776 objects in one CSV cell is not a
+    # column anyone can use. The table lives in `--mode variations`, one row
+    # per variant, the same way reviews got their own schema.
+    parent_asin: Optional[str] = None
+    # The dimensions this product varies over, as the site labels them for a
+    # human: ["Size", "Color"], ["Option", "Digital Storage Capacity", ...].
+    variation_dimensions: Optional[List[str]] = None
+    # The site's OWN count (`num_total_variations`), not len() of anything we
+    # extracted — so it can be compared against what we extracted, which is
+    # what makes the extraction self-checking instead of threshold-guessed.
+    variation_count: Optional[int] = None
+    # Which variant THIS row is, as "Label: value" pairs.
+    selected_variation: Optional[List[str]] = None
 
 
 @dataclass

@@ -1175,6 +1175,159 @@ def _first_parsing_price(soup, selectors, mcur):
     return None, None
 
 
+# ---------------------------------------------------------------------------
+# Variations
+# ---------------------------------------------------------------------------
+#
+# The old path read `#twister .a-button-text, #twisterContainer .a-button-text`
+# and produced null on every row of every run. Measured 2026-09-21 against
+# three live /dp/ pages fetched with an ordinary HTTP client:
+#
+#   ASIN         product               #twister  #twisterContainer  li[data-asin]
+#   B0CHWRXH8B   AirPods Pro 2                0                  0             0
+#   B0014C2NBC   Crocs Classic Clog           0                  0           105
+#   B08KTZ8249   Kindle Paperwhite            0                  0             9
+#
+# Both selectors match nothing on any of them — not drift, dead. The
+# container that replaced them, `#twister-plus-inline-twister`, is present
+# but is an EMPTY MOUNT POINT in the served HTML: on the AirPods page it has
+# three descendant elements, no <li> and no `.a-button-text`. So a CSS fix
+# there would be dead code against any HTTP-client capture and would only
+# work in a browser after hydration.
+#
+# What IS in the served bytes is the page's own variation state, the same
+# object the twister renders itself from:
+#
+#   "dimensions"                  ["size_name", "color_name"]   keys, in order
+#   "variationDisplayLabels"      {"size_name": "Size", ...}    human names
+#   "dimensionValuesDisplayData"  {ASIN: [value per dimension]} the variants
+#   "landingAsin" / "parentAsin"  which one was requested, and its parent
+#   "num_total_variations"        the site's OWN count
+#
+# On those same three pages the map held 1, 776 and 9 ASINs and
+# num_total_variations said 1, 776 and 9 — so the site states the answer we
+# can check ourselves against, which beats any threshold (§21's totalPages
+# trick on a different field).
+#
+# The values in each ASIN's list are positional against `dimensions`, which
+# is why the two are read together and neither is used alone.
+
+# Each key appears once, spelled `"key" : <json>` inside a script. The
+# surrounding blob is a JS object literal, but these VALUES are ordinary JSON.
+# Non-greedy to the closing brace/bracket followed by the next key, so a
+# nested object cannot run the match off the end of the page.
+_VAR_OBJ_RE = r'"%s"\s*:\s*(\{.*?\})\s*,\s*"'
+_VAR_ARR_RE = r'"%s"\s*:\s*(\[.*?\])\s*,\s*"'
+# landingAsin and parentAsin are read as a PAIR, not each on its own. Both
+# names occur more than once on a detail page — `parentAsin` appears first
+# inside `twisterUpdateURLAppend.immutableParams`, ~11 KB before the state
+# block — so reading the first occurrence of each was correct on all three
+# measured pages by luck rather than by structure. In the state they are
+# adjacent, which is a fact about the object and not about byte offsets.
+_VAR_ASIN_PAIR_RE = re.compile(
+    r'"landingAsin"\s*:\s*"([A-Z0-9]{10})"\s*,\s*'
+    r'"parentAsin"\s*:\s*"([A-Z0-9]{10})"')
+_VAR_INT_RE = r'"%s"\s*:\s*(\d+)'
+
+# Where the twister mounts. Used only to tell "this product has no variations"
+# from "the state moved and we can no longer read it" — never to read values.
+VARIATION_MOUNT_SELECTOR = ("#twister-plus-inline-twister, #twister, "
+                            "#twisterContainer, #variation_color_name, "
+                            "#variation_size_name")
+
+
+def _variation_json(html: str, pattern: str, key: str, loader=json.loads):
+    """One key out of the page's variation state, or None.
+
+    Never raises: this is best-effort extraction from a blob whose shape is
+    the site's business, and a malformed value must degrade to a null column
+    rather than take down a run that has a title, a price and a sku.
+    """
+    m = re.search(pattern % key, html, re.S)
+    if not m:
+        return None
+    try:
+        return loader(m.group(1))
+    except (ValueError, TypeError):
+        return None
+
+
+def variation_state(html: str) -> dict:
+    """The detail page's variation state, normalised. Keys may be None."""
+    pair = _VAR_ASIN_PAIR_RE.search(html)
+    return {
+        "dimensions": _variation_json(html, _VAR_ARR_RE, "dimensions"),
+        "labels": _variation_json(html, _VAR_OBJ_RE, "variationDisplayLabels"),
+        "values_by_asin": _variation_json(html, _VAR_OBJ_RE,
+                                          "dimensionValuesDisplayData"),
+        "landing_asin": pair.group(1) if pair else None,
+        "parent_asin": pair.group(2) if pair else None,
+        "stated_total": _variation_json(html, _VAR_INT_RE,
+                                        "num_total_variations", int),
+    }
+
+
+def _labelled_values(state: dict, asin: Optional[str]) -> Optional[List[str]]:
+    """["Size: 8 Women/6 Men", "Color: Black"] for one ASIN, or None.
+
+    The values are positional against `dimensions`, so a state missing
+    either half yields nothing rather than a guess at the pairing.
+    """
+    values = (state.get("values_by_asin") or {}).get(asin)
+    dims = state.get("dimensions")
+    if not values or not dims:
+        return None
+    labels = state.get("labels") or {}
+    out = []
+    for i, dim in enumerate(dims):
+        if i >= len(values):
+            break
+        out.append("%s: %s" % (labels.get(dim, dim), values[i]))
+    return out or None
+
+
+def variation_columns(html: str, soup, asin: Optional[str]) -> dict:
+    """The four variation columns for a detail row.
+
+    Returns all four as None when the product genuinely has no variations.
+    Warns — loudly, with the sku — when the mount point is on the page but
+    the state is not readable, because that is the shape the defect this
+    replaces actually took: a column that is null everywhere reads as "this
+    site does not publish it" and hides a parser that stopped working.
+    """
+    state = variation_state(html)
+    values_by_asin = state.get("values_by_asin") or {}
+    stated = state.get("stated_total")
+
+    if not values_by_asin:
+        if soup.select_one(VARIATION_MOUNT_SELECTOR) is not None:
+            logger.warning(
+                "%s: a variation container is on the page but its state was "
+                "not readable — the variation columns will be null. This is "
+                "the shape of a moved state key, not of a product without "
+                "variations; check a --dump-html capture for "
+                "dimensionValuesDisplayData.", asin)
+        return {}
+
+    # The site's own count against what we actually read. Not fatal — the
+    # rows are still right — but it is the only free signal that the
+    # extraction has started missing variants.
+    if stated is not None and stated != len(values_by_asin):
+        logger.warning("%s: the page states %d variations and we read %d. "
+                       "Reporting the site's number; the gap is ours.",
+                       asin, stated, len(values_by_asin))
+
+    dims = state.get("dimensions") or []
+    labels = state.get("labels") or {}
+    return {
+        "parent_asin": state.get("parent_asin"),
+        "variation_dimensions": [labels.get(d, d) for d in dims] or None,
+        "variation_count": stated if stated is not None else len(values_by_asin),
+        "selected_variation": _labelled_values(
+            state, asin or state.get("landing_asin")),
+    }
+
+
 def parse_product_detail(html: str, base_url: str, category: Optional[str] = None
                          ) -> List[Product]:
     """One Product from a /dp/{ASIN} page, with the detail-only fields filled.
@@ -1214,8 +1367,7 @@ def parse_product_detail(html: str, base_url: str, category: Optional[str] = Non
     availability = soup.select_one("#availability")
     bullets = [b.get_text(" ", strip=True) for b
                in soup.select("#feature-bullets li span.a-list-item")]
-    variations = [v.get_text(" ", strip=True) for v
-                  in soup.select("#twister .a-button-text, #twisterContainer .a-button-text")]
+    variation = variation_columns(html, soup, asin)
     # Scoped, not document-wide. Read from the whole page, _review_count_from
     # matched an aria-label belonging to a "customers also viewed" carousel
     # item and reported ITS review count (13,930) for this product, whose own
@@ -1250,7 +1402,10 @@ def parse_product_detail(html: str, base_url: str, category: Optional[str] = Non
         availability=_clean_text(availability.get_text(" ", strip=True)) if availability else None,
         bullets=bullets or None,
         images=_detail_images(soup),
-        variations=variations or None,
+        parent_asin=variation.get("parent_asin"),
+        variation_dimensions=variation.get("variation_dimensions"),
+        variation_count=variation.get("variation_count"),
+        selected_variation=variation.get("selected_variation"),
     )]
 
 

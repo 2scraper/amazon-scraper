@@ -40,6 +40,7 @@ import importlib
 import io
 import inspect
 import json
+import logging
 import os
 import re
 import subprocess
@@ -518,6 +519,32 @@ def test_url_fallback_and_tile_scope():
 DETAIL_PAGE = None  # built in main(), from the fragments below
 
 
+@contextlib.contextmanager
+def _captured_warnings():
+    """Collect WARNING-level records from product_parser for the duration.
+
+    A warning is the only output some of these paths produce, so asserting
+    on it is asserting on the behaviour rather than on a side effect nobody
+    checks.
+    """
+    messages = []
+
+    class _Catch(logging.Handler):
+        def emit(self, record):
+            if record.levelno >= logging.WARNING:
+                messages.append(record.getMessage())
+
+    target = logging.getLogger("product_parser")
+    handler = _Catch()
+    target.addHandler(handler)
+    previous, target.propagate = target.propagate, False
+    try:
+        yield messages
+    finally:
+        target.removeHandler(handler)
+        target.propagate = previous
+
+
 def test_product_detail():
     group("product detail page (real capture)")
     ok = True
@@ -570,6 +597,109 @@ def test_product_detail():
     ok &= check("no #productTitle -> no row (a warning, not a fake product)",
                 parse_product_detail(page("<div>nothing here</div>"),
                                      "https://www.amazon.com/dp/B07K5214NZ") == [])
+    return ok
+
+
+# The variation state as amazon.com writes it, carved VERBATIM out of a live
+# /dp/B08KTZ8249 capture taken 2026-09-21 (992 KB down to 1.5 KB) and
+# verified to yield byte-identical variation columns to the untrimmed page
+# before being committed. Nine variants over four dimensions, which is the
+# richest shape measured and small enough to read.
+#
+# Kept as the page's own bytes, punctuation and key order included, because
+# the whole defect this replaces was a parser aimed at markup that no longer
+# exists. A hand-written fixture would have been aimed at what we believe
+# rather than at what Amazon sends.
+#
+# `aBogusTrailingKey` is not Amazon's. It is here so every one of the
+# non-greedy value patterns has a following key to stop at, which is the
+# condition on the real page and is what a fixture ending at the last
+# interesting key would silently not test.
+FIX_VARIATION_STATE = """
+<div id="dp-container" data-asin="B08KTZ8249">
+<span id="productTitle">Amazon Kindle Paperwhite (8 GB)</span>
+<div id="twister-plus-inline-twister"></div>
+<script type="text/javascript">
+P.register('twister-js-init-mason-data', function() { return {
+                "dimensions" : ["style_name","digital_storage_capacity","configuration","color_name"],
+                "variationDisplayLabels" : {"digital_storage_capacity":"Digital Storage Capacity","configuration":"Offer Type","color_name":"Color","style_name":"Option"},
+                "dimensionValuesDisplayData" : {"B09RD7XM9X":["Without Kindle Unlimited","8 GB","Without Lockscreen Ads","Black"],"B0B9YSHFJR":["Without Kindle Unlimited","16 GB","Without Lockscreen Ads","Black"],"B09TMN58KL":["Without Kindle Unlimited","16 GB","Lockscreen Ad-Supported","Black"],"B095J2XYWX":["Without Kindle Unlimited","16 GB","Lockscreen Ad-Supported","Denim"],"B08KTZ8249":["Without Kindle Unlimited","8 GB","Lockscreen Ad-Supported","Black"],"B0B9Z7SYPB":["Without Kindle Unlimited","16 GB","Without Lockscreen Ads","Agave Green"],"B09TMZKQR7":["Without Kindle Unlimited","16 GB","Lockscreen Ad-Supported","Agave Green"],"B0BDCMBKB4":["With 3 Months Free Kindle Unlimited","16 GB","Without Lockscreen Ads","Black"],"B0B9YZSXB7":["Without Kindle Unlimited","16 GB","Without Lockscreen Ads","Denim"]},
+                "landingAsin": "B08KTZ8249",
+                "parentAsin" : "B09F7TGV1H",
+                "num_total_variations" : 9,
+                "aBogusTrailingKey" : 1
+} });
+</script>
+</div>
+"""
+
+
+def test_variations():
+    """The four variation columns, on a real capture, with pinned values.
+
+    The column these replace was null on every row of every run, and a
+    coverage check would have called that 0%% and moved on. So the values are
+    pinned: the count, the dimension labels IN THE SITE'S ORDER, and which
+    variant the requested ASIN is.
+    """
+    group("variation columns (real capture, pinned values)")
+    ok = True
+    url = "https://www.amazon.com/dp/B08KTZ8249"
+    rows = parse_product_detail(page(FIX_VARIATION_STATE), url)
+    ok &= check("a detail page with a twister yields a row", len(rows) == 1)
+    if not rows:
+        return False
+    r = rows[0]
+
+    ok &= check("variation_count is the site's OWN number (9)",
+                r.variation_count == 9)
+    # The order is the site's `dimensions` order, not the order the labels
+    # object happens to list them in — those differ on this very page, which
+    # is why this is pinned as a sequence rather than as a set.
+    ok &= check("variation_dimensions are the human labels, in the site's "
+                "dimension order",
+                r.variation_dimensions == ["Option", "Digital Storage Capacity",
+                                           "Offer Type", "Color"])
+    ok &= check("selected_variation says which variant THIS row is",
+                r.selected_variation == [
+                    "Option: Without Kindle Unlimited",
+                    "Digital Storage Capacity: 8 GB",
+                    "Offer Type: Lockscreen Ad-Supported",
+                    "Color: Black"])
+    ok &= check("parent_asin is the twister's parent, not the row's own sku",
+                r.parent_asin == "B09F7TGV1H" and r.sku == "B08KTZ8249")
+
+    # The values are positional against `dimensions`. A state carrying one
+    # half and not the other must yield nothing rather than pair them by
+    # position anyway.
+    import product_parser as pp
+    half = pp.variation_state(
+        '{"dimensionValuesDisplayData" : {"B08KTZ8249":["8 GB"]}, "x":1}')
+    ok &= check("values with no `dimensions` list pair with nothing",
+                pp._labelled_values(half, "B08KTZ8249") is None)
+
+    # The mount point is on the page but the state is not readable: that is
+    # a moved state key, not a product without variations, and it is exactly
+    # how the replaced column failed silently for months. It must SAY so.
+    quiet = page('<div id="dp-container" data-asin="B08KTZ8249">'
+                 '<span id="productTitle">x</span>'
+                 '<div id="twister-plus-inline-twister"></div></div>')
+    with _captured_warnings() as logged:
+        moved = parse_product_detail(quiet, url)
+    ok &= check("a mount point with no readable state -> null columns",
+                moved and moved[0].variation_count is None
+                and moved[0].variation_dimensions is None)
+    ok &= check("...and a warning that names it as a moved key, not as a "
+                "product without variations",
+                any("not readable" in m for m in logged))
+
+    # And the ordinary case: no twister at all is not a warning.
+    plain = page('<div id="dp-container" data-asin="B08KTZ8249">'
+                 '<span id="productTitle">x</span></div>')
+    with _captured_warnings() as logged:
+        single = parse_product_detail(plain, url)
+    ok &= check("a product with no variations is silent, not warned about",
+                single and single[0].variation_count is None and not logged)
     return ok
 
 
@@ -771,10 +901,19 @@ def test_output_contract():
     ok &= check("Amazon's own columns come after them",
                 names[16:] == ["page", "position", "sponsored", "badge", "coupon",
                                "seller", "availability", "bullets", "images",
-                               "variations"])
+                               "parent_asin", "variation_dimensions",
+                               "variation_count", "selected_variation"])
     # A column that is null on every row of every run is worse than a missing
     # one; Amazon rendered no Prime marker on any captured tile.
     ok &= check("there is no 'prime' column", "prime" not in names)
+    # Same rule, applied a second time. `variations` read the twister's
+    # rendered buttons and was null on every row of every run — measured on
+    # three live /dp/ pages on 2026-09-21, where both of its selectors
+    # matched zero elements. It is replaced, not repaired: the four columns
+    # above come from the page's own variation state, and one of them (the
+    # count) is a number the site states so the extraction can check itself.
+    ok &= check("there is no 'variations' column either",
+                "variations" not in names)
     ok &= check("Review is its own schema, keyed on sku like the others",
                 [f.name for f in fields(Review)][:5]
                 == ["source", "scraped_at", "url", "sku", "review_id"])
@@ -1880,6 +2019,7 @@ def main() -> int:
     ok &= test_bestseller_cards()
     ok &= test_url_fallback_and_tile_scope()
     ok &= test_product_detail()
+    ok &= test_variations()
     ok &= test_reviews()
     ok &= test_urls()
     ok &= test_marketplaces()

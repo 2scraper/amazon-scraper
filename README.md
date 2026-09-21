@@ -83,7 +83,7 @@ something you wanted. Use a virtualenv per engine if you need more than one.
 python3 playwright_scraper.py --url "https://www.amazon.com/s?k=wireless+headphones" --pages 3
 python3 playwright_scraper.py --url "https://www.amazon.com/Best-Sellers-Electronics/zgbs/electronics/" --pages 2
 
-# 2. PRODUCT — one /dp/{ASIN} page, with brand, seller, bullets and images
+# 2. PRODUCT — one /dp/{ASIN} page: brand, seller, bullets, images, variations
 python3 playwright_scraper.py --mode product --url "https://www.amazon.com/dp/B07K5214NZ"
 
 # 3. REVIEWS — the reviews Amazon renders to a visitor with no account
@@ -127,7 +127,8 @@ after.
 | `price_source` | `offscreen` / `split` / `detail` — which node the price was read from |
 | `page`, `position` | Which listing page, and the position within it. On a best-seller grid `position` is Amazon's published rank (#1–#50) |
 | `sponsored`, `badge`, `coupon` | Sponsored placements are flagged, not dropped |
-| `seller`, `availability`, `bullets`, `images`, `variations` | `--mode product` only; null on a listing run |
+| `seller`, `availability`, `bullets`, `images` | `--mode product` only; null on a listing run |
+| `parent_asin`, `variation_dimensions`, `variation_count`, `selected_variation` | `--mode product` only. The twister's dimensions as the site labels them, how many variants the site says there are, and which one this row is. See below |
 
 `--mode reviews` writes a different schema: `sku`, `review_id`, `title`,
 `rating`, `author`, `review_date`, `verified_purchase`, `helpful_votes`,
@@ -179,6 +180,41 @@ produced anything — so "the proxy died" and "the search matched nothing" are
 distinguishable without clobbering the last good result. That file is
 rewritten on every run, successful ones included, so it is never a stale
 relic of an old failure.
+
+### Variations
+
+A `--mode product` row carries four variation columns, read from the detail
+page's own variation state rather than from the rendered size/colour picker:
+
+| Column | Example (`/dp/B08KTZ8249`, 2026-09-21) |
+|---|---|
+| `parent_asin` | `B09F7TGV1H` |
+| `variation_dimensions` | `Option`, `Digital Storage Capacity`, `Offer Type`, `Color` |
+| `variation_count` | `9` |
+| `selected_variation` | `Option: Without Kindle Unlimited`, `Digital Storage Capacity: 8 GB`, `Offer Type: Lockscreen Ad-Supported`, `Color: Black` |
+
+`variation_count` is the number **the page itself states**, not a count of
+what was extracted — so the two can be compared, and the parser warns when
+they disagree instead of quietly reporting fewer variants than exist.
+
+**Why these four and not the whole variant table.** One measured product,
+the Crocs Classic Clog (`/dp/B0014C2NBC`, 2026-09-21), publishes **776**
+variants over Size and Color. A column holding 776 objects is not something
+a CSV consumer can use, and dividing it across four scalars loses nothing a
+row needs: the identity of this variant, what it varies over, and how much
+more there is. Reading every variant is a different job from reading a
+product.
+
+**The column that used to be here.** `variations` read the rendered twister
+(`#twister .a-button-text`, `#twisterContainer .a-button-text`) and was null
+on every row of every run. Measured on three live `/dp/` pages on
+2026-09-21 — AirPods Pro 2, the Crocs clog and the Kindle Paperwhite — both
+of those selectors matched **zero** elements on all three. The container
+that replaced them, `#twister-plus-inline-twister`, is present but is an
+empty mount point in the served HTML (three descendant elements, no `<li>`,
+no `.a-button-text` on the AirPods page), so it is only populated after the
+page's own JavaScript runs. The state object is in the served bytes either
+way, which is why it is what gets read.
 
 ### Exit codes
 
