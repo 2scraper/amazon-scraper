@@ -45,6 +45,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import types
 from dataclasses import fields
 
 from captcha_solver import (detect_recaptcha_v3, detect_recaptcha_in_page,
@@ -1236,6 +1237,67 @@ def test_proxy_pool():
     return ok
 
 
+def test_scraper_api_exit_contract():
+    """The Scraper API client must reach the SAME decision as the engines.
+
+    It used to call `save` and hand-spell its own 3 and 4, so a run through
+    it wrote no run-metadata sidecar at all: the rows were readable but the
+    status, stop reason and marketplace were not, and an empty result could
+    not be told from a challenge page except by reading the log.
+
+    This does not make it a fourth engine — it still fetches one page and
+    has no pagination, which is why success is `single_page_mode`. It makes
+    its output honest, which is the smaller and checkable claim.
+    """
+    group("the Scraper API client shares the engines' exit contract")
+    ok = True
+    try:
+        import scraper_api_client as sac
+    except ImportError as exc:                              # noqa: BLE001
+        return check("scraper_api_client imports (%r)" % exc, False)
+
+    tmp = tempfile.mkdtemp()
+
+    def args_for(name):
+        return types.SimpleNamespace(
+            out=os.path.join(tmp, name), format="json", allow_empty=False,
+            url="https://www.amazon.de/s?k=x")
+
+    cases = [
+        ("rows, one page", [Product(sku="A")], False, "single_page_mode", 0),
+        ("a challenge page", [], True, "blocked_amazon-captcha", EXIT_BLOCKED),
+        ("served, nothing on it", [], False, "completed", EXIT_NO_PRODUCTS),
+        # The one the old code could not say at all: the API itself failed,
+        # so no page was ever obtained.
+        ("the API call failed", [], False, "http_error", EXIT_FETCH_FAILED),
+    ]
+    for label, rows, blocked, reason, expected in cases:
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = sac._finish(rows, args_for(label.replace(" ", "_")),
+                             blocked=blocked, stop_reason=reason)
+        ok &= check("%s -> exit %d" % (label, expected), rc == expected)
+
+    # And the sidecar a successful run now leaves behind.
+    meta_path = os.path.join(tmp, "rows,_one_page.meta.json")
+    ok &= check("a Scraper API run writes the run-metadata sidecar",
+                os.path.exists(meta_path))
+    if os.path.exists(meta_path):
+        m = json.load(open(meta_path))
+        ok &= check("...naming its status, stop reason and marketplace",
+                    m["status"] == "complete"
+                    and m["stop_reason"] == "single_page_mode"
+                    and m["source"] == "amazon.de")
+
+    # EXIT_API_ERROR must be an ALIAS, not a second spelling of 5 that can
+    # drift from the one output_writer documents.
+    ok &= check("EXIT_API_ERROR aliases the shared EXIT_FETCH_FAILED",
+                sac.EXIT_API_ERROR is EXIT_FETCH_FAILED)
+    src = inspect.getsource(sac)
+    ok &= check("the client decides nothing itself: no bare `return 3/4/5`",
+                not re.search(r"return\s+[345]\b", src))
+    return ok
+
+
 def test_scraper_api_never_logs_a_credential():
     """SECURITY.md names the Scraper API's x-debug header as a place
     credentials reach a log unmasked. It was then logged verbatim.
@@ -1829,6 +1891,7 @@ def main() -> int:
     ok &= test_page_flow()
     ok &= test_numeric_arg_validation()
     ok &= test_scraper_api_never_logs_a_credential()
+    ok &= test_scraper_api_exit_contract()
     ok &= test_env_config()
     ok &= test_proxy_pool()
     ok &= test_engines(skips)

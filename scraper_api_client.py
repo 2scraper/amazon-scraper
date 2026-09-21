@@ -90,8 +90,9 @@ from typing import Optional
 
 import requests
 
-from product_parser import parse_products, detect_bot_challenge, BOT_CHALLENGE_MARKERS
-from output_writer import save
+from product_parser import (parse_products, detect_bot_challenge,
+                            marketplace_host, BOT_CHALLENGE_MARKERS)
+from output_writer import finish_run, EXIT_FETCH_FAILED
 import env_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -107,7 +108,11 @@ MAX_API_TIMEOUT = 120
 # is not the operator passing wrong arguments, and a harness that lumps them
 # together sends you looking in the wrong place. Run 7 reported `exit=2` for an
 # HTTP 422 from the API — which reads as "you called it wrong".
-EXIT_API_ERROR = 5
+# An alias, not a second declaration: "the remote API failed" and "the page
+# was never fetched" are the same fact to a caller, and output_writer is
+# where that code's meaning is written down. Spelling 5 here again is how the
+# two drift.
+EXIT_API_ERROR = EXIT_FETCH_FAILED
 
 def _mask_credentials(url: str) -> str:
     """Never print a username:password embedded in a ws://... or http://... URL."""
@@ -224,6 +229,30 @@ def fetch_html(args) -> str:
     return html
 
 
+def _finish(rows, args, *, blocked: bool, stop_reason: str) -> int:
+    """Every outcome of this client, through the same decision the engines use.
+
+    It used to call `save` and hand-spell its own 3 and 4, which meant a
+    Scraper API run wrote no run-metadata sidecar at all: a consumer could
+    read the rows but could not learn the status, the stop reason or the
+    marketplace, and had no way to tell an empty result from a challenge
+    page except by reading the log. The browser engines have had that since
+    finish_run existed.
+
+    This does NOT make it a fourth engine — it still fetches exactly one
+    page and still has no pagination, which is why `stop_reason` is
+    `single_page_mode` on success. It makes its OUTPUT honest, which is a
+    smaller claim and the one worth making now.
+    """
+    return finish_run(rows, args.out, args.format, args.allow_empty,
+                      blocked=blocked, stop_reason=stop_reason,
+                      # One page, always: there is no --pages here.
+                      pages_requested=1,
+                      pages_completed=1 if rows else 0,
+                      mode="listing", source=marketplace_host(args.url),
+                      start_url=args.url, final_url=args.url)
+
+
 def main() -> int:
     args = parse_args()
 
@@ -253,12 +282,12 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
         html = fetch_html(args)
     except requests.RequestException as e:
         logger.error("Network error talking to the Scraper API: %s", e)
-        return EXIT_API_ERROR
+        return _finish([], args, blocked=False, stop_reason="http_error")
     except RuntimeError as e:
         # HTTP 4xx/5xx from the API, including the 422 that a busy or
         # unreachable cdpurl produces.
         logger.error("%s", e)
-        return EXIT_API_ERROR
+        return _finish([], args, blocked=False, stop_reason="http_error")
 
     if args.dump_html:
         with open(args.dump_html, "w", encoding="utf-8") as f:
@@ -275,7 +304,8 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
                      "anything (--retries). This site needs a rendered browser in the "
                      "path: pass --cdp-url, or use playwright_scraper.py / "
                      "puppeteer_scraper.py directly.")
-        return 3
+        return _finish([], args, blocked=True,
+                       stop_reason="blocked_%s" % vendor)
 
     products = parse_products(html, args.url, category=args.category)
     logger.info("Parsed %d products.", len(products))
@@ -286,9 +316,9 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
             f.write(html)
         logger.warning("0 products parsed — saved the raw response to %s so you can see "
                        "what actually came back.", dump)
-        return 4
+        return _finish([], args, blocked=False, stop_reason="completed")
 
-    return save(products, args.out, args.format, allow_empty=args.allow_empty)
+    return _finish(products, args, blocked=False, stop_reason="single_page_mode")
 
 
 def parse_args():
