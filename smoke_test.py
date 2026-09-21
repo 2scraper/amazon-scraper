@@ -35,7 +35,9 @@ Exits non-zero on any failure.
 """
 
 import ast
+import contextlib
 import importlib
+import io
 import inspect
 import json
 import os
@@ -838,6 +840,31 @@ def test_writers():
                 "the repo", meta["mode"] == "reviews" and meta["source"] == "amazon.de")
     ok &= check("the sidecar names WHICH pages failed, not just how many",
                 "pages_failed" in meta)
+    ok &= check("a reviews sidecar counts RECORDS and says what one is — "
+                "13 reviews of one product are not 13 products",
+                meta["records"] == 5 and meta["record_type"] == "review")
+    ok &= check("`products` survives as a deprecated alias of the same count",
+                meta["products"] == meta["records"])
+    listing_meta = run_meta("complete", "completed", 1, 1, "u", "u2", 3)
+    ok &= check("a listing sidecar says record_type=product",
+                listing_meta["record_type"] == "product"
+                and listing_meta["records"] == 3)
+
+    # The printed line too, not just the sidecar: "Saved 13 products" for
+    # thirteen reviews of one ASIN is the same wrong claim in the place a
+    # human actually reads.
+    noun_out = os.path.join(tmp, "nouns")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        save([Review(sku="A", review_id="r1"), Review(sku="A", review_id="r2")],
+             noun_out, "json", row_cls=Review)
+    ok &= check("save() reports reviews as reviews, not as products",
+                "Saved 2 reviews" in buf.getvalue())
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        save([Product(sku="A")], noun_out + "_p", "json")
+    ok &= check("and a single product is singular, not '1 products'",
+                "Saved 1 product " in buf.getvalue())
 
     # status/exit mapping, shared so the three engines cannot drift
     cases = [

@@ -355,6 +355,22 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
         "pages_requested": pages_requested,
         "pages_completed": pages_completed,
         "pages_failed": pages_failed or [],
+        # How many ROWS the run wrote, and what one row is. `products` was
+        # the only name for years and is wrong for a mode whose rows are not
+        # products: a live reviews run recorded "products": 13 for thirteen
+        # reviews of ONE product, which reads as thirteen products to
+        # anything summing the field across runs.
+        #
+        # `record_type` is derived from the row class rather than written
+        # per mode, so a new mode cannot add a row type and forget to
+        # declare it here.
+        "records": products,
+        "record_type": ROW_CLASS_BY_MODE.get(mode, Product).__name__.lower(),
+        # Deprecated alias, kept because it has been in every sidecar this
+        # project has ever written and something is reading it. Identical to
+        # `records`, including for reviews, where both are equally the row
+        # count — the fix is the NAME, so silently changing what the old
+        # name means would be worse than leaving it wrong.
         "products": products,
         "start_url": start_url,
         "final_url": final_url,
@@ -386,12 +402,15 @@ def save(rows: Sequence[Any], out_prefix: str, fmt: str,
               f"Pass --allow-empty if an empty result is the expected answer.")
         return EXIT_NO_PRODUCTS
 
+    # The noun comes from the row class, so a reviews run does not report
+    # "Saved 13 products" for thirteen reviews of one product.
+    noun = row_cls.__name__.lower() + ("" if len(rows) == 1 else "s")
     if fmt in ("json", "both"):
         write_json(rows, f"{out_prefix}.json")
-        print(f"[+] Saved {len(rows)} products -> {out_prefix}.json")
+        print(f"[+] Saved {len(rows)} {noun} -> {out_prefix}.json")
     if fmt in ("csv", "both"):
         write_csv(rows, f"{out_prefix}.csv", row_cls=row_cls)
-        print(f"[+] Saved {len(rows)} products -> {out_prefix}.csv")
+        print(f"[+] Saved {len(rows)} {noun} -> {out_prefix}.csv")
     return 0 if rows else EXIT_NO_PRODUCTS
 
 

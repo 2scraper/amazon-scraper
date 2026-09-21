@@ -150,6 +150,8 @@ Every successful run writes `<out>.meta.json` beside its output:
   "pages_requested": 3,
   "pages_completed": 3,
   "pages_failed": [],
+  "records": 77,
+  "record_type": "product",
   "products": 77,
   "start_url": "https://www.amazon.com/s?k=bluetooth+headphones&i=electronics",
   "final_url": "https://www.amazon.com/s?k=bluetooth+headphones&i=electronics&page=3",
@@ -161,9 +163,22 @@ Every successful run writes `<out>.meta.json` beside its output:
 `pages_failed` names WHICH pages produced nothing, by number — a count stops
 being a description once page 3 can fail while 4 and 5 succeed.
 
-A **failed** run writes no sidecar at all, because it also does not overwrite
-the previous run's output, and a `"failed"` sidecar sitting beside good data
-would contradict it.
+`records` is how many rows were written and `record_type` says what one row
+is — `product` for `--mode listing` and `--mode product`, `review` for
+`--mode reviews`. Count the reviews, not the products: a reviews run returns
+about a dozen rows for ONE ASIN, so `"products": 13` was a wrong claim in a
+field something might be summing. `products` is still written, identical to
+`records`, because it has been in every sidecar this project ever wrote —
+but it is deprecated, and new consumers should read `records`.
+
+A **failed** run writes no `<out>.meta.json`, because it also does not
+overwrite the previous run's output and a `"failed"` sidecar sitting beside
+good data would contradict it. It does write `<out>.last_attempt.json`,
+which carries the same fields for the most recent attempt whether or not it
+produced anything — so "the proxy died" and "the search matched nothing" are
+distinguishable without clobbering the last good result. That file is
+rewritten on every run, successful ones included, so it is never a stale
+relic of an old failure.
 
 ### Exit codes
 
