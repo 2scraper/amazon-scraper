@@ -78,14 +78,6 @@ ITEM_LINK_SELECTOR = SELECTORS["item_link"]
 PAGE_LOAD_TIMEOUT = 60
 SCRIPT_TIMEOUT = 30
 
-# Chromium's own names for "the proxy is the problem, not the site". A dead
-# proxy and a slow page want opposite responses — a different exit versus
-# another try at the same one — so they are told apart by the error text.
-_PROXY_ERROR_MARKERS = (
-    "ERR_PROXY_CONNECTION_FAILED", "ERR_TUNNEL_CONNECTION_FAILED",
-    "ERR_PROXY_AUTH_UNSUPPORTED", "ERR_PROXY_AUTH_REQUESTED",
-    "ERR_UNEXPECTED_PROXY_AUTH", "ERR_PROXY_CERTIFICATE_INVALID",
-)
 
 
 @dataclass
@@ -481,7 +473,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
                 break
             except (TimeoutException, WebDriverException) as e:
                 text = str(e)
-                reason = next((m for m in _PROXY_ERROR_MARKERS if m in text), "")
+                reason = page_flow.proxy_failure(e)
                 load_failed = True
                 if reason:
                     exit_failed = reason

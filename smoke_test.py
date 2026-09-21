@@ -1377,6 +1377,73 @@ def test_proxy_pool():
     return ok
 
 
+def test_proxy_failure_semantics():
+    """A dead proxy and a timeout want opposite responses, in all three
+    engines.
+
+    A timeout deserves another try at the SAME exit; an unusable exit
+    deserves a different one, because retrying it unchanged spends the
+    budget on a proxy that is not going to answer. Getting that backwards is
+    invisible offline and expensive live.
+
+    Two things went wrong here and both are pinned below.
+
+    The classifier was declared THREE TIMES — each engine carried its own
+    copy of the marker tuple and inlined its own match. They happened to be
+    byte-identical, which is the state a drift starts from, not a defence
+    against one.
+
+    And the responses had already drifted: pyppeteer rotated the exit on ANY
+    load failure, so an ordinary network flap spent a --proxy-block-retries
+    budget and re-fetched the page, while Playwright and Selenium gave up.
+    Three engines disagreeing about what a timeout means.
+    """
+    group("proxy failure vs. timeout (shared, and identical in all three)")
+    ok = True
+
+    # Real Chromium error text, as each driver surfaces it.
+    cases = [
+        ("Page.goto: net::ERR_PROXY_CONNECTION_FAILED at https://www.amazon.com/s?k=x",
+         "ERR_PROXY_CONNECTION_FAILED"),
+        ("net::ERR_TUNNEL_CONNECTION_FAILED", "ERR_TUNNEL_CONNECTION_FAILED"),
+        ("net::ERR_PROXY_AUTH_REQUESTED", "ERR_PROXY_AUTH_REQUESTED"),
+        ("net::ERR_PROXY_CERTIFICATE_INVALID", "ERR_PROXY_CERTIFICATE_INVALID"),
+        # ...and the ones that are NOT a proxy problem.
+        ("Timeout 60000ms exceeded.", ""),
+        ("net::ERR_NAME_NOT_RESOLVED", ""),
+        ("net::ERR_CONNECTION_RESET", ""),
+        ("", ""),
+    ]
+    for text, expected in cases:
+        got = page_flow.proxy_failure(text)
+        ok &= check("%r -> %r" % (text[:46], expected), got == expected)
+
+    # It takes the EXCEPTION, not a pre-extracted string, so no caller can
+    # forget to stringify a driver's own exception type.
+    ok &= check("an exception object classifies the same as its text",
+                page_flow.proxy_failure(
+                    RuntimeError("net::ERR_PROXY_CONNECTION_FAILED"))
+                == "ERR_PROXY_CONNECTION_FAILED")
+
+    ok &= check("every marker in the shared tuple is recognised",
+                all(page_flow.proxy_failure("net::" + m) == m
+                    for m in page_flow.PROXY_ERROR_MARKERS))
+
+    for name in ENGINES:
+        src = open(os.path.join(REPO_ROOT, name + ".py"), encoding="utf-8").read()
+        ok &= check("%s classifies through the shared helper" % name,
+                    "page_flow.proxy_failure(" in src)
+        ok &= check("%s keeps no private copy of the marker tuple" % name,
+                    "_PROXY_ERROR_MARKERS" not in src)
+        # The drift that actually shipped: rotating on `load_failed` rather
+        # than on `exit_failed` means a timeout burns a proxy rotation.
+        ok &= check("%s rotates the exit only for a PROXY failure" % name,
+                    "if exit_failed and block_attempt < block_retries:" in src)
+        ok &= check("%s does not rotate on a bare load failure" % name,
+                    "if load_failed and block_attempt < block_retries:" not in src)
+    return ok
+
+
 def test_scraper_api_exit_contract():
     """The Scraper API client must reach the SAME decision as the engines.
 
@@ -2081,6 +2148,7 @@ def main() -> int:
     ok &= test_numeric_arg_validation()
     ok &= test_scraper_api_never_logs_a_credential()
     ok &= test_scraper_api_exit_contract()
+    ok &= test_proxy_failure_semantics()
     ok &= test_env_config()
     ok &= test_proxy_pool()
     ok &= test_engines(skips)

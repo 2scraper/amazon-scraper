@@ -461,7 +461,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
 
     for block_attempt in range(block_retries + 1):
         logger.info("Fetching page %d/%d: %s", page_num, args.pages, url)
-        load_failed = False
+        load_failed, exit_failed = False, None
         for attempt in range(1, args.retries + 1):
             try:
                 bridge.run(page.goto(url, {"waitUntil": "domcontentloaded",
@@ -469,25 +469,32 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
                 load_failed = False
                 break
             except Exception as e:  # noqa: BLE001 — pyppeteer raises many types
-                load_failed = True
                 # pyppeteer surfaces a dead proxy as a page error whose text
                 # carries Chromium's own name for it, exactly as Playwright
                 # does; a timeout and an unusable exit want opposite
                 # responses, so they are told apart by that text.
-                text = str(e)
-                if any(marker in text for marker in _PROXY_ERROR_MARKERS):
-                    logger.warning("Exit %s is unusable (%s).",
-                                   mask(pool.current) if pool else "(none)", text[:120])
-                    break
+                reason = page_flow.proxy_failure(e)
+                load_failed = True
+                if reason:
+                    exit_failed = reason
+                    break  # a different exit is the only thing that helps
                 if attempt < args.retries:
                     pause = args.retry_delay * (2 ** (attempt - 1))
                     logger.warning("Failed to load %s (attempt %d/%d: %s) — "
                                    "retrying in %.1fs.", url, attempt,
-                                   args.retries, text[:120], pause)
+                                   args.retries, str(e)[:120], pause)
                     time.sleep(pause)
 
-        if load_failed and block_attempt < block_retries:
-            pool.advance("unusable exit or repeated load failure")
+        # Only a proxy failure rotates, which is what the other two engines
+        # do. This used to rotate on ANY load failure, so an ordinary network
+        # flap spent a --proxy-block-retries budget and re-fetched the page
+        # while its twins gave up -- three engines disagreeing about what a
+        # timeout means, which is the drift page_flow exists to prevent.
+        if exit_failed and block_attempt < block_retries:
+            logger.warning("Exit %s is unusable (%s) — rotating to another "
+                           "one (%d/%d).", mask(pool.current), exit_failed,
+                           block_attempt + 1, block_retries)
+            pool.advance(f"unusable exit: {exit_failed}")
             session.relaunch()
             bridge, page = session.bridge, session.page
             d = _driver(session)
@@ -659,12 +666,6 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
     return outcome
 
 
-# Chromium's own names for "the proxy is the problem, not the site".
-_PROXY_ERROR_MARKERS = (
-    "ERR_PROXY_CONNECTION_FAILED", "ERR_TUNNEL_CONNECTION_FAILED",
-    "ERR_PROXY_AUTH_UNSUPPORTED", "ERR_PROXY_AUTH_REQUESTED",
-    "ERR_UNEXPECTED_PROXY_AUTH", "ERR_PROXY_CERTIFICATE_INVALID",
-)
 
 
 def scrape(args) -> int:

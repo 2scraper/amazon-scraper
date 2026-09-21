@@ -305,33 +305,6 @@ def _same_url(a: str, b: str) -> bool:
            significant(pa.query) == significant(pb.query)
 
 
-# Chromium's own names for "the proxy is the problem, not the site". Matched
-# on the error text because Playwright surfaces them as a generic Error.
-_PROXY_ERROR_MARKERS = (
-    "ERR_PROXY_CONNECTION_FAILED",     # nothing listening / refused
-    "ERR_TUNNEL_CONNECTION_FAILED",    # CONNECT rejected by the proxy
-    "ERR_PROXY_AUTH_UNSUPPORTED",      # auth scheme we cannot satisfy
-    "ERR_PROXY_AUTH_REQUESTED",        # credentials missing or wrong
-    "ERR_UNEXPECTED_PROXY_AUTH",
-    "ERR_PROXY_CERTIFICATE_INVALID",
-)
-
-
-def _proxy_failure(exc) -> str:
-    """The Chromium proxy-error name in `exc`, or "" if it is not one.
-
-    Distinguishing this from an ordinary timeout matters because the two want
-    opposite responses: a timeout deserves a retry from the same exit, while
-    an unusable exit deserves a different exit — retrying it unchanged just
-    spends the retry budget on a proxy that is not going to answer.
-    """
-    text = str(exc)
-    for marker in _PROXY_ERROR_MARKERS:
-        if marker in text:
-            return marker
-    return ""
-
-
 def _launch_local(pw, args, pool):
     """Launch our own Chromium on `pool`'s current exit; return (browser, context, page).
 
@@ -676,7 +649,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
                 # catching only the latter lets it escape as a traceback,
                 # which is the likeliest failure the first time anyone points
                 # --proxy-file at a real list.
-                reason = _proxy_failure(e)
+                reason = page_flow.proxy_failure(e)
                 if reason:
                     exit_failed = reason
                     load_failed = True
