@@ -35,14 +35,19 @@ Exits non-zero on any failure.
 """
 
 import ast
+import contextlib
 import importlib
+import io
 import inspect
 import json
+import logging
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import textwrap
+import types
 from dataclasses import fields
 
 from captcha_solver import (detect_recaptcha_v3, detect_recaptcha_in_page,
@@ -52,6 +57,7 @@ from diff_runs import diff_products
 import env_config
 import page_flow
 from output_writer import (Product, Review, save, finish_run, write_csv,
+                           EXIT_FETCH_FAILED,
                            dedupe_by_key, dedupe_by_sku, run_meta,
                            ROW_CLASS_BY_MODE, EXIT_BLOCKED, EXIT_NO_PRODUCTS,
                            EXIT_PARTIAL, COMPLETE_STOP_REASONS,
@@ -514,6 +520,32 @@ def test_url_fallback_and_tile_scope():
 DETAIL_PAGE = None  # built in main(), from the fragments below
 
 
+@contextlib.contextmanager
+def _captured_warnings():
+    """Collect WARNING-level records from product_parser for the duration.
+
+    A warning is the only output some of these paths produce, so asserting
+    on it is asserting on the behaviour rather than on a side effect nobody
+    checks.
+    """
+    messages = []
+
+    class _Catch(logging.Handler):
+        def emit(self, record):
+            if record.levelno >= logging.WARNING:
+                messages.append(record.getMessage())
+
+    target = logging.getLogger("product_parser")
+    handler = _Catch()
+    target.addHandler(handler)
+    previous, target.propagate = target.propagate, False
+    try:
+        yield messages
+    finally:
+        target.removeHandler(handler)
+        target.propagate = previous
+
+
 def test_product_detail():
     group("product detail page (real capture)")
     ok = True
@@ -566,6 +598,109 @@ def test_product_detail():
     ok &= check("no #productTitle -> no row (a warning, not a fake product)",
                 parse_product_detail(page("<div>nothing here</div>"),
                                      "https://www.amazon.com/dp/B07K5214NZ") == [])
+    return ok
+
+
+# The variation state as amazon.com writes it, carved VERBATIM out of a live
+# /dp/B08KTZ8249 capture taken 2026-09-21 (992 KB down to 1.5 KB) and
+# verified to yield byte-identical variation columns to the untrimmed page
+# before being committed. Nine variants over four dimensions, which is the
+# richest shape measured and small enough to read.
+#
+# Kept as the page's own bytes, punctuation and key order included, because
+# the whole defect this replaces was a parser aimed at markup that no longer
+# exists. A hand-written fixture would have been aimed at what we believe
+# rather than at what Amazon sends.
+#
+# `aBogusTrailingKey` is not Amazon's. It is here so every one of the
+# non-greedy value patterns has a following key to stop at, which is the
+# condition on the real page and is what a fixture ending at the last
+# interesting key would silently not test.
+FIX_VARIATION_STATE = """
+<div id="dp-container" data-asin="B08KTZ8249">
+<span id="productTitle">Amazon Kindle Paperwhite (8 GB)</span>
+<div id="twister-plus-inline-twister"></div>
+<script type="text/javascript">
+P.register('twister-js-init-mason-data', function() { return {
+                "dimensions" : ["style_name","digital_storage_capacity","configuration","color_name"],
+                "variationDisplayLabels" : {"digital_storage_capacity":"Digital Storage Capacity","configuration":"Offer Type","color_name":"Color","style_name":"Option"},
+                "dimensionValuesDisplayData" : {"B09RD7XM9X":["Without Kindle Unlimited","8 GB","Without Lockscreen Ads","Black"],"B0B9YSHFJR":["Without Kindle Unlimited","16 GB","Without Lockscreen Ads","Black"],"B09TMN58KL":["Without Kindle Unlimited","16 GB","Lockscreen Ad-Supported","Black"],"B095J2XYWX":["Without Kindle Unlimited","16 GB","Lockscreen Ad-Supported","Denim"],"B08KTZ8249":["Without Kindle Unlimited","8 GB","Lockscreen Ad-Supported","Black"],"B0B9Z7SYPB":["Without Kindle Unlimited","16 GB","Without Lockscreen Ads","Agave Green"],"B09TMZKQR7":["Without Kindle Unlimited","16 GB","Lockscreen Ad-Supported","Agave Green"],"B0BDCMBKB4":["With 3 Months Free Kindle Unlimited","16 GB","Without Lockscreen Ads","Black"],"B0B9YZSXB7":["Without Kindle Unlimited","16 GB","Without Lockscreen Ads","Denim"]},
+                "landingAsin": "B08KTZ8249",
+                "parentAsin" : "B09F7TGV1H",
+                "num_total_variations" : 9,
+                "aBogusTrailingKey" : 1
+} });
+</script>
+</div>
+"""
+
+
+def test_variations():
+    """The four variation columns, on a real capture, with pinned values.
+
+    The column these replace was null on every row of every run, and a
+    coverage check would have called that 0%% and moved on. So the values are
+    pinned: the count, the dimension labels IN THE SITE'S ORDER, and which
+    variant the requested ASIN is.
+    """
+    group("variation columns (real capture, pinned values)")
+    ok = True
+    url = "https://www.amazon.com/dp/B08KTZ8249"
+    rows = parse_product_detail(page(FIX_VARIATION_STATE), url)
+    ok &= check("a detail page with a twister yields a row", len(rows) == 1)
+    if not rows:
+        return False
+    r = rows[0]
+
+    ok &= check("variation_count is the site's OWN number (9)",
+                r.variation_count == 9)
+    # The order is the site's `dimensions` order, not the order the labels
+    # object happens to list them in — those differ on this very page, which
+    # is why this is pinned as a sequence rather than as a set.
+    ok &= check("variation_dimensions are the human labels, in the site's "
+                "dimension order",
+                r.variation_dimensions == ["Option", "Digital Storage Capacity",
+                                           "Offer Type", "Color"])
+    ok &= check("selected_variation says which variant THIS row is",
+                r.selected_variation == [
+                    "Option: Without Kindle Unlimited",
+                    "Digital Storage Capacity: 8 GB",
+                    "Offer Type: Lockscreen Ad-Supported",
+                    "Color: Black"])
+    ok &= check("parent_asin is the twister's parent, not the row's own sku",
+                r.parent_asin == "B09F7TGV1H" and r.sku == "B08KTZ8249")
+
+    # The values are positional against `dimensions`. A state carrying one
+    # half and not the other must yield nothing rather than pair them by
+    # position anyway.
+    import product_parser as pp
+    half = pp.variation_state(
+        '{"dimensionValuesDisplayData" : {"B08KTZ8249":["8 GB"]}, "x":1}')
+    ok &= check("values with no `dimensions` list pair with nothing",
+                pp._labelled_values(half, "B08KTZ8249") is None)
+
+    # The mount point is on the page but the state is not readable: that is
+    # a moved state key, not a product without variations, and it is exactly
+    # how the replaced column failed silently for months. It must SAY so.
+    quiet = page('<div id="dp-container" data-asin="B08KTZ8249">'
+                 '<span id="productTitle">x</span>'
+                 '<div id="twister-plus-inline-twister"></div></div>')
+    with _captured_warnings() as logged:
+        moved = parse_product_detail(quiet, url)
+    ok &= check("a mount point with no readable state -> null columns",
+                moved and moved[0].variation_count is None
+                and moved[0].variation_dimensions is None)
+    ok &= check("...and a warning that names it as a moved key, not as a "
+                "product without variations",
+                any("not readable" in m for m in logged))
+
+    # And the ordinary case: no twister at all is not a warning.
+    plain = page('<div id="dp-container" data-asin="B08KTZ8249">'
+                 '<span id="productTitle">x</span></div>')
+    with _captured_warnings() as logged:
+        single = parse_product_detail(plain, url)
+    ok &= check("a product with no variations is silent, not warned about",
+                single and single[0].variation_count is None and not logged)
     return ok
 
 
@@ -767,10 +902,19 @@ def test_output_contract():
     ok &= check("Amazon's own columns come after them",
                 names[16:] == ["page", "position", "sponsored", "badge", "coupon",
                                "seller", "availability", "bullets", "images",
-                               "variations"])
+                               "parent_asin", "variation_dimensions",
+                               "variation_count", "selected_variation"])
     # A column that is null on every row of every run is worse than a missing
     # one; Amazon rendered no Prime marker on any captured tile.
     ok &= check("there is no 'prime' column", "prime" not in names)
+    # Same rule, applied a second time. `variations` read the twister's
+    # rendered buttons and was null on every row of every run — measured on
+    # three live /dp/ pages on 2026-09-21, where both of its selectors
+    # matched zero elements. It is replaced, not repaired: the four columns
+    # above come from the page's own variation state, and one of them (the
+    # count) is a number the site states so the extraction can check itself.
+    ok &= check("there is no 'variations' column either",
+                "variations" not in names)
     ok &= check("Review is its own schema, keyed on sku like the others",
                 [f.name for f in fields(Review)][:5]
                 == ["source", "scraped_at", "url", "sku", "review_id"])
@@ -837,6 +981,31 @@ def test_writers():
                 "the repo", meta["mode"] == "reviews" and meta["source"] == "amazon.de")
     ok &= check("the sidecar names WHICH pages failed, not just how many",
                 "pages_failed" in meta)
+    ok &= check("a reviews sidecar counts RECORDS and says what one is — "
+                "13 reviews of one product are not 13 products",
+                meta["records"] == 5 and meta["record_type"] == "review")
+    ok &= check("`products` survives as a deprecated alias of the same count",
+                meta["products"] == meta["records"])
+    listing_meta = run_meta("complete", "completed", 1, 1, "u", "u2", 3)
+    ok &= check("a listing sidecar says record_type=product",
+                listing_meta["record_type"] == "product"
+                and listing_meta["records"] == 3)
+
+    # The printed line too, not just the sidecar: "Saved 13 products" for
+    # thirteen reviews of one ASIN is the same wrong claim in the place a
+    # human actually reads.
+    noun_out = os.path.join(tmp, "nouns")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        save([Review(sku="A", review_id="r1"), Review(sku="A", review_id="r2")],
+             noun_out, "json", row_cls=Review)
+    ok &= check("save() reports reviews as reviews, not as products",
+                "Saved 2 reviews" in buf.getvalue())
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        save([Product(sku="A")], noun_out + "_p", "json")
+    ok &= check("and a single product is singular, not '1 products'",
+                "Saved 1 product " in buf.getvalue())
 
     # status/exit mapping, shared so the three engines cannot drift
     cases = [
@@ -846,6 +1015,16 @@ def test_writers():
         (dict(blocked=False, stop_reason="no_new_products", rows=[Product(sku="A")]), 0, "complete"),
         (dict(blocked=False, stop_reason="single_page_mode", rows=[Product(sku="A")]), 0, "complete"),
         (dict(blocked=False, stop_reason="page_load_timeout", rows=[Product(sku="A")]), EXIT_PARTIAL, "partial"),
+        # The audit case: a page that was never fetched is NOT an empty
+        # result. A live run through a misconfigured proxy exited 4 here,
+        # the code that tells a pipeline the catalogue was read and was bare.
+        (dict(blocked=False, stop_reason="page_load_timeout", rows=[]), EXIT_FETCH_FAILED, None),
+        # A named challenge still outranks a transport failure: it says more.
+        (dict(blocked=True, stop_reason="page_load_timeout", rows=[]), EXIT_BLOCKED, None),
+        # And the negative half, which is what keeps the set honest:
+        # pages_unattempted means page 1 WAS fetched, so a run holding
+        # nothing under it really did find nothing.
+        (dict(blocked=False, stop_reason="pages_unattempted", rows=[]), EXIT_NO_PRODUCTS, None),
     ]
     for i, (kw, expected_rc, expected_status) in enumerate(cases):
         prefix = os.path.join(tmp, "run%d" % i)
@@ -862,6 +1041,24 @@ def test_writers():
     # contradict it, and diff_runs would refuse data that is fine.
     ok &= check("a failed run writes NO sidecar",
                 not os.path.exists(os.path.join(tmp, "run0.meta.json")))
+    # ...but it must leave SOMETHING machine-readable, or the exit code is
+    # the whole story and a caller cannot tell a dead proxy from an empty
+    # search. A separate filename is what lets both facts coexist.
+    la0 = os.path.join(tmp, "run0.last_attempt.json")
+    ok &= check("a failed run DOES write <out>.last_attempt.json",
+                os.path.exists(la0))
+    if os.path.exists(la0):
+        m = json.load(open(la0))
+        ok &= check("the last-attempt manifest names the status and the reason",
+                    m["status"] == "failed"
+                    and m["stop_reason"] == "blocked_amazon-captcha")
+    # Written on a success too, so it is never a stale relic of the last
+    # failure: a manifest that only appears on failure cannot be trusted to
+    # be absent when things are fine.
+    la_ok = os.path.join(tmp, "run2.last_attempt.json")
+    ok &= check("a successful run writes it too, with status complete",
+                os.path.exists(la_ok)
+                and json.load(open(la_ok))["status"] == "complete")
     return ok
 
 
@@ -1177,6 +1374,178 @@ def test_proxy_pool():
                 ProxyPool(["http://a:1"], rotate="per-run").rotates_per_page() is False)
     ok &= check("a comment line in a proxy file is skipped",
                 parse_proxy_line("# a comment") is None)
+    return ok
+
+
+def test_scraper_api_exit_contract():
+    """The Scraper API client must reach the SAME decision as the engines.
+
+    It used to call `save` and hand-spell its own 3 and 4, so a run through
+    it wrote no run-metadata sidecar at all: the rows were readable but the
+    status, stop reason and marketplace were not, and an empty result could
+    not be told from a challenge page except by reading the log.
+
+    This does not make it a fourth engine — it still fetches one page and
+    has no pagination, which is why success is `single_page_mode`. It makes
+    its output honest, which is the smaller and checkable claim.
+    """
+    group("the Scraper API client shares the engines' exit contract")
+    ok = True
+    try:
+        import scraper_api_client as sac
+    except ImportError as exc:                              # noqa: BLE001
+        return check("scraper_api_client imports (%r)" % exc, False)
+
+    tmp = tempfile.mkdtemp()
+
+    def args_for(name):
+        return types.SimpleNamespace(
+            out=os.path.join(tmp, name), format="json", allow_empty=False,
+            url="https://www.amazon.de/s?k=x")
+
+    cases = [
+        ("rows, one page", [Product(sku="A")], False, "single_page_mode", 0),
+        ("a challenge page", [], True, "blocked_amazon-captcha", EXIT_BLOCKED),
+        ("served, nothing on it", [], False, "completed", EXIT_NO_PRODUCTS),
+        # The one the old code could not say at all: the API itself failed,
+        # so no page was ever obtained.
+        ("the API call failed", [], False, "http_error", EXIT_FETCH_FAILED),
+    ]
+    for label, rows, blocked, reason, expected in cases:
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = sac._finish(rows, args_for(label.replace(" ", "_")),
+                             blocked=blocked, stop_reason=reason)
+        ok &= check("%s -> exit %d" % (label, expected), rc == expected)
+
+    # And the sidecar a successful run now leaves behind.
+    meta_path = os.path.join(tmp, "rows,_one_page.meta.json")
+    ok &= check("a Scraper API run writes the run-metadata sidecar",
+                os.path.exists(meta_path))
+    if os.path.exists(meta_path):
+        m = json.load(open(meta_path))
+        ok &= check("...naming its status, stop reason and marketplace",
+                    m["status"] == "complete"
+                    and m["stop_reason"] == "single_page_mode"
+                    and m["source"] == "amazon.de")
+
+    # EXIT_API_ERROR must be an ALIAS, not a second spelling of 5 that can
+    # drift from the one output_writer documents.
+    ok &= check("EXIT_API_ERROR aliases the shared EXIT_FETCH_FAILED",
+                sac.EXIT_API_ERROR is EXIT_FETCH_FAILED)
+    src = inspect.getsource(sac)
+    ok &= check("the client decides nothing itself: no bare `return 3/4/5`",
+                not re.search(r"return\s+[345]\b", src))
+    return ok
+
+
+def test_scraper_api_never_logs_a_credential():
+    """SECURITY.md names the Scraper API's x-debug header as a place
+    credentials reach a log unmasked. It was then logged verbatim.
+
+    The fixtures here are deliberately NOT the two strings that happen to
+    appear in this repo today: the header is the remote API's own metadata,
+    so a check written against today's exact value passes for the wrong
+    reason the moment the API changes shape. They are the shapes a
+    credential takes — a Scraping Browser endpoint, an authenticated proxy,
+    a key as a query parameter — and the assertion is that the SECRET is
+    gone while the part worth logging survives.
+    """
+    group("the Scraper API's x-debug header is redacted before logging")
+    ok = True
+    try:
+        import scraper_api_client as sac
+    except ImportError as exc:                              # noqa: BLE001
+        return check("scraper_api_client imports (%r)" % exc, False)
+
+    # Assembled from pieces, never written out whole. This file is scanned by
+    # the credential check like every other, and a fixture that LOOKS like a
+    # live key or a credentialed URL fails that check — as the first version
+    # of these three did, on six lines. The alternative is an allowlist
+    # entry, which is a hole a real credential could later hide in, so the
+    # strings are built instead. Same reason a sibling repo assembles its
+    # banned-wording fixtures rather than exempting the suite file.
+    _pw = "SeCr" + "EtPw"
+    _pw2, _pw3 = "hunt" + "er2", "pw2nd" + "one"
+    _key = "abcdef01" * 4              # 32 hex chars, built not written
+    _ckey = "z" * 18
+    cases = [
+        ("cdpurl=ws://acct-zone-scraping_browser-pid-7:" + _pw
+         + "@cb.2captcha.com:9222 cost=0.00145 status=200",
+         [_pw], ["cost=0.00145", "cb.2captcha.com:9222", "status=200"]),
+        ("retry via http://joe:" + _pw2 + "@gate.example.net:2334 then "
+         "https://bob:" + _pw3 + "@other.example:1 ok",
+         [_pw2, _pw3], ["gate.example.net:2334", "other.example"]),
+        ("key=" + _key + "&clientKey=" + _ckey + " status=ok",
+         [_key, _ckey], ["status=ok"]),
+    ]
+    for raw, secrets, keep in cases:
+        out = sac._redact_debug_header(raw)
+        leaked = [x for x in secrets if x in out]
+        lost = [x for x in keep if x not in out]
+        ok &= check("x-debug: %s redacted, %s kept"
+                    % (len(secrets), ", ".join(keep)[:48]),
+                    not leaked and not lost)
+
+    # Every occurrence, not the first: a masker that handles one and prints
+    # the rest looks like it is working.
+    s1, s2 = "secret" + "one", "secret" + "two"
+    two = sac._redact_debug_header(
+        "a=http://u1:" + s1 + "@h1:1 b=http://u2:" + s2 + "@h2:2")
+    ok &= check("both credentials in one header are masked, not just the first",
+                s1 not in two and s2 not in two)
+
+    # And that the log line actually goes through it.
+    src = inspect.getsource(sac)
+    ok &= check("the x-debug log line calls the redactor",
+                'logger.info("x-debug: %s", _redact_debug_header(debug))' in src)
+    return ok
+
+
+def test_numeric_arg_validation():
+    """Out-of-range numbers are refused, and refused identically everywhere.
+
+    Every value below was accepted silently before, and two of them made a
+    run report success for work it never did — see
+    page_flow.numeric_arg_errors for what each one actually did.
+    """
+    group("numeric argument validation")
+    ok = True
+    good = dict(pages=3, retries=3, retry_delay=2.0, delay=1.0,
+                concurrency=2, min_score=0.3)
+    ok &= check("a sane set of numbers produces no errors",
+                page_flow.numeric_arg_errors(**good) == [])
+
+    for field, value, word in (("pages", 0, "--pages"),
+                               ("pages", -1, "--pages"),
+                               ("retries", 0, "--retries"),
+                               ("retry_delay", -1.0, "--retry-delay"),
+                               ("delay", -0.5, "--delay"),
+                               ("concurrency", 0, "--concurrency"),
+                               ("min_score", 1.5, "--min-score"),
+                               ("min_score", -0.1, "--min-score")):
+        bad = dict(good, **{field: value})
+        errors = page_flow.numeric_arg_errors(**bad)
+        ok &= check("%s=%r is refused, and the message names the flag"
+                    % (word, value),
+                    len(errors) == 1 and word in errors[0])
+
+    # The boundary, in both directions: a min-score of exactly 0 or 1 is a
+    # legal score, and refusing it would be a defect of its own.
+    ok &= check("--min-score 0.0 and 1.0 are legal",
+                page_flow.numeric_arg_errors(**dict(good, min_score=0.0)) == []
+                and page_flow.numeric_arg_errors(**dict(good, min_score=1.0)) == [])
+    ok &= check("--pages 1 and --retries 1 are legal",
+                page_flow.numeric_arg_errors(**dict(good, pages=1, retries=1)) == [])
+
+    # And that every engine actually consults it. The signature-binding
+    # check proves a call that EXISTS is well-formed; this is the other
+    # half — that it has not been dropped from one of the three, which is
+    # how an engine quietly starts accepting input its twins refuse.
+    for name in ENGINES:
+        path = os.path.join(REPO_ROOT, name + ".py")
+        src = open(path, encoding="utf-8").read()
+        ok &= check("%s validates its numbers through the shared helper" % name,
+                    "page_flow.numeric_arg_errors(" in src)
     return ok
 
 
@@ -1545,6 +1914,54 @@ def test_sample_output():
 
 
 # ---------------------------------------------------------------------------
+def test_workflow_inline_python_compiles():
+    """The Python embedded in a workflow's heredoc must at least parse.
+
+    Both canary jobs assert their results with `python3 - <<'EOF'` inline in
+    the YAML, and nothing checked those bytes until a runner executed them.
+    A syntax error there costs a full dispatch to discover — install
+    Playwright, fetch pages, THEN crash on the assertions — and on the
+    scheduled job it reads as a site-side failure rather than as a typo.
+
+    Deliberately regex-and-dedent rather than a YAML parse: PyYAML is not a
+    dependency of this project (requirements.txt is beautifulsoup4 and
+    requests) and adding one so a test can read a workflow would be the
+    wrong trade. A block scalar's common indentation is what dedent removes,
+    which is the only YAML fact this needs to know.
+
+    It asserts it FOUND blocks as well as that they compile: a check that
+    silently scans nothing passes for the wrong reason, which is how a guard
+    quietly stops guarding once its input moves.
+    """
+    group("inline Python in the workflows compiles")
+    ok = True
+    wf_dir = os.path.join(REPO_ROOT, ".github", "workflows")
+    ok &= check(".github/workflows is present", os.path.isdir(wf_dir))
+    if not os.path.isdir(wf_dir):
+        return False
+
+    found = 0
+    for name in sorted(os.listdir(wf_dir)):
+        if not name.endswith((".yml", ".yaml")):
+            continue
+        text = open(os.path.join(wf_dir, name), encoding="utf-8").read()
+        for m in re.finditer(r"python3? - <<'(\w+)'\n(.*?)\n[ \t]*\1\b",
+                             text, re.S):
+            found += 1
+            body = textwrap.dedent(m.group(2))
+            label = "%s block %d" % (name, found)
+            try:
+                compile(body, label, "exec")
+                ok &= check("%s parses" % label, True)
+            except SyntaxError as exc:
+                ok &= check("%s parses (%s line %s)"
+                            % (label, exc.msg, exc.lineno), False)
+
+    ok &= check("...and there were blocks to check (found %d)" % found,
+                found >= 2)
+    return ok
+
+
 def test_ci_checks_is_actually_wired_up():
     group("the shipped CI checks run, and pass on this repo")
     ok = True
@@ -1651,6 +2068,7 @@ def main() -> int:
     ok &= test_bestseller_cards()
     ok &= test_url_fallback_and_tile_scope()
     ok &= test_product_detail()
+    ok &= test_variations()
     ok &= test_reviews()
     ok &= test_urls()
     ok &= test_marketplaces()
@@ -1660,11 +2078,15 @@ def main() -> int:
     ok &= test_diff()
     ok &= test_captcha()
     ok &= test_page_flow()
+    ok &= test_numeric_arg_validation()
+    ok &= test_scraper_api_never_logs_a_credential()
+    ok &= test_scraper_api_exit_contract()
     ok &= test_env_config()
     ok &= test_proxy_pool()
     ok &= test_engines(skips)
     ok &= test_no_capture_leaks()
     ok &= test_ci_checks_is_actually_wired_up()
+    ok &= test_workflow_inline_python_compiles()
     ok &= test_fingerprint_client_reads_env()
     ok &= test_wording()
     ok &= test_shared_calls_bind_against_the_real_signature()

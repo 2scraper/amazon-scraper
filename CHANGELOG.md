@@ -10,7 +10,124 @@ one, and when it does the release notes say so first.
 
 ## [Unreleased]
 
+> **Two changes here affect an existing user before anything else does.**
+>
+> **A run that never got its page now exits 5, not 4.** Exit 4 has always
+> meant "ran fine, found nothing", and a navigation timeout or a dead proxy
+> returned it too — so a pipeline could not tell an empty search from a
+> transport failure, which want opposite responses. If you branch on exit
+> codes, 5 is now also "we never obtained the page" and not only "the
+> Scraper API errored". A run that gathered rows and THEN timed out is still
+> exit 6, unchanged.
+>
+> **The `variations` column is gone**, replaced by `parent_asin`,
+> `variation_dimensions`, `variation_count` and `selected_variation`. It read
+> the rendered size/colour picker and was null on every row of every run —
+> measured on three live `/dp/` pages on 2026-09-21, where both of its
+> selectors matched zero elements on all three. If you parse `--mode product`
+> output by column name, read the four new ones; if you read it positionally,
+> the row is four columns longer.
+
+### Changed
+
+- **A page that was never fetched reports `EXIT_FETCH_FAILED` (5) instead of
+  `EXIT_NO_PRODUCTS` (4)** when the run holds no rows. A live run through a
+  misconfigured proxy failed to load for 60 seconds and exited 4, telling a
+  caller the catalogue had been read and was bare. The precedence is
+  unchanged otherwise: a named challenge still outranks it (3), and rows plus
+  a later failure is still a partial run (6). 5 rather than a new code
+  because the family's contract already reserves it for a transport failure,
+  every repo in the family spells 4 the same way and none defines a 7 — a new
+  code here would make this the only one whose callers need a per-repo table.
+- **The sidecar counts `records` and says what one record is.** A reviews run
+  recorded `"products": 13` for thirteen reviews of one product, which reads
+  as thirteen products to anything summing the field. `records` is the row
+  count and `record_type` is `product` or `review`, derived from the row
+  class so a new mode cannot forget to declare it. `products` is still
+  written and still identical, but is deprecated — read `records`.
+- **`save()` names what it saved.** "Saved 13 products" for thirteen reviews
+  was the same wrong claim in the place a human reads; a single row is now
+  "1 product" rather than "1 products".
+- **Out-of-range numeric arguments are refused** (exit 2) rather than acted
+  on. `--retries 0` was the worst: the navigation loop is
+  `range(1, retries + 1)`, so it never ran, and because `load_failed` is
+  pre-set to False just above it nothing was recorded as wrong either — the
+  run classified a page it had never fetched and reported success. `--pages 0`
+  fetched page 1 anyway (it is fetched outside the page loop) and produced a
+  sidecar saying `pages_requested: 0` against `pages_completed: 1`. A negative
+  delay reached `time.sleep` and became a traceback. The bounds live in one
+  shared, pure helper, and all three engines consult it, so they cannot
+  disagree about the same input. `--concurrency` was NOT one of these: the
+  engine that implements it already clamped it.
+- **The Scraper API client goes through the shared `finish_run`.** It called
+  `save` and hand-spelled its own 3 and 4, so a run through it wrote no
+  run-metadata sidecar at all — the rows were readable but the status, stop
+  reason and marketplace were not. It is still not a fourth engine: one page,
+  no pagination, and success reports `single_page_mode`. `EXIT_API_ERROR` is
+  now an alias of the shared constant rather than a second spelling of 5.
+
+### Removed
+
+- **The `variations` column.** A column that is null on every row of every
+  run is worse than a missing one — the same rule that removed `prime` from
+  this schema, with the measurement written down. Both of its selectors
+  (`#twister .a-button-text`, `#twisterContainer .a-button-text`) matched
+  zero elements on three live `/dp/` pages on 2026-09-21. Replaced, not
+  repaired: see Added.
+
 ### Added
+
+- **Four variation columns on a `--mode product` row**, read from the detail
+  page's own variation state rather than from the rendered picker:
+  `parent_asin`, `variation_dimensions` (the dimensions as the site labels
+  them for a human, in the site's own order), `variation_count` (the number
+  the **page itself states**, so it can be compared against what was
+  extracted — the parser warns when they disagree) and `selected_variation`
+  (which variant this row is). Measured 2026-09-21: 1, 776 and 9 variants on
+  the three pages tested, matching the site's stated totals exactly.
+  The container that replaced the old one is an empty mount point in the
+  served HTML, so it is only populated after the page's own JavaScript runs;
+  the state object is in the served bytes either way, which is why it is what
+  gets read. Scalars rather than the whole variant table because one measured
+  product publishes 776 variants, and 776 objects in a CSV cell is not a
+  column anyone can use.
+- **`<out>.last_attempt.json`, written on every run.** A failed run
+  deliberately writes no `<out>.meta.json` — it also does not overwrite the
+  previous run's output, and a `"failed"` sidecar beside good data would
+  contradict it — which until now left the caller nothing at all to read, so
+  the exit code was the whole story. A separate filename lets the last good
+  sidecar and the most recent attempt both be true. Rewritten on success too,
+  so it is never a stale relic of an old failure.
+- **A check that binds every call into a shared module against the callee's
+  real signature** (§17's check #1), which this repo did not have. It catches
+  two things nothing else here can: a call whose arguments do not fit the
+  signature, and a call to a name the shared module does not define at all —
+  both of which reach a live run as a crash on the first fetch while import,
+  `--help`, `compileall` and the undefined-name walk all stay green. It skips
+  calls using `*args`/`**kwargs` rather than guessing, treats a locally-bound
+  name as shadowing a same-named module, and asserts it found calls to bind
+  at all so it cannot pass by scanning nothing. Verified by control.
+- **The first variation fixture this repo has had** — 1.5 KB carved verbatim
+  out of a 992 KB live capture and verified to produce byte-identical columns
+  to the untrimmed page before being committed. There was no twister fixture
+  at all, which is how the selectors could die unnoticed. Its values are
+  pinned, not merely counted.
+
+### Fixed
+
+- **The Scraper API's `x-debug` response header is redacted before it is
+  logged.** `SECURITY.md` names that header as one of three places
+  credentials reach a log unmasked, and the client logged it whole: the API
+  echoes back the task it ran, so a run driven through a credentialed CDP
+  endpoint put that endpoint's username and password into the log. Both
+  patterns are global, because a masker that handles the first occurrence
+  prints the password the other four times and looks like it is working.
+- **`landingAsin` and `parentAsin` are read as an adjacent pair.**
+  `parentAsin` also occurs about 11 KB earlier on a detail page, in an
+  unrelated object, so reading the first occurrence of each was correct on
+  all three measured pages by luck rather than by structure.
+
+### CI
 
 - **A check that binds every call into a shared module against the callee's
   real signature** (§17's check #1), which this repo did not have. It catches
@@ -22,9 +139,25 @@ one, and when it does the release notes say so first.
   name as shadowing a same-named module, and asserts it found calls to bind
   at all so it cannot pass by scanning nothing. Verified by control.
 
-
 ### CI
 
+- **A variation canary**, reading one real multi-variant product page and
+  asserting all four columns are populated, that the count is not 1 on a
+  product picked for having many, and that there is one selected value per
+  dimension. A floor rather than the measured 776, because a catalogue
+  legitimately changes size. **Dispatch-only until someone runs it from the
+  default branch and sees which way it goes**: a `/dp/` page was served to a
+  plain HTTP client from a datacenter address on 2026-09-21, which is a
+  reason to expect it to pass from a runner and not evidence that it does,
+  and an unverified live job on a schedule is how a badge goes permanently
+  red. The promotion steps are written beside it.
+- **The Python embedded in the workflows' heredocs is compiled by the offline
+  suite.** Both canary jobs assert their results with inline Python, and
+  nothing checked those bytes until a runner executed them — a syntax error
+  there costs a full dispatch to discover and, on the scheduled job, reads as
+  a site-side failure rather than a typo. Four blocks across the two
+  workflows. Done by dedent rather than by parsing YAML, because PyYAML is
+  not a dependency of this project.
 - **The Docker image is now built in CI.** Nothing built it before, which is
   exactly how three repos in this family shipped an image that died with
   `ModuleNotFoundError` on every invocation, `--help` included — the

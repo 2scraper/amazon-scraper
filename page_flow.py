@@ -47,7 +47,7 @@ README, and the measurements are dated because Amazon's markup will move.
 """
 
 import logging
-from typing import Optional
+from typing import List, Optional
 
 from product_parser import detect_page_state, listing_kind
 
@@ -283,6 +283,59 @@ VARIANT_REROLL_ATTEMPTS = 5
 # further passes only add seconds to a session that is already lost. Three
 # elsewhere, where lazy loading is real and a pass genuinely adds cards.
 HYDRATE_ATTEMPTS = {"reviews": 1}
+
+
+def numeric_arg_errors(*, pages: int, retries: int, retry_delay: float,
+                       delay: float, concurrency: Optional[int] = None,
+                       min_score: Optional[float] = None) -> List[str]:
+    """Every out-of-range numeric argument, as messages. Pure, so it is
+    testable without building an argparse parser.
+
+    Here rather than in each engine because a budget of zero is this module's
+    business: `session_attempts` and `hydrate_attempts` multiply --retries
+    into a real number of attempts, so the module that decides what a retry
+    budget MEANS is the one that should say when it is not a budget.
+
+    Each of these was accepted silently before, and two of them made the run
+    lie about what it did:
+
+    --retries 0   the navigation loop is `range(1, retries + 1)`, so it never
+                  runs. Worse than skipping the fetch: `load_failed` is
+                  pre-set to False just above it, so nothing is recorded as
+                  having gone wrong and the run proceeds to classify an
+                  unfetched page. It reports success for work it never did.
+    --pages 0     page 1 is fetched outside the page loop, so it is fetched
+                  anyway, and the sidecar comes back with pages_requested=0
+                  against pages_completed=1 — arithmetic no consumer can
+                  read.
+    negative delays   `time.sleep` raises on a negative value, so this became
+                  a traceback (exit 1) on a line reached only after a fetch.
+
+    --concurrency is NOT in that list: the engine that has it already clamps
+    with max(1, ...), so 0 is merely rounded up rather than accepted. It is
+    still validated here so that a caller who typed a negative number is
+    told rather than quietly given one worker, and so the three engines
+    answer the same way about the same input.
+    """
+    errors = []
+    if pages < 1:
+        errors.append("--pages must be at least 1 (page 1 is fetched "
+                      "regardless, so 0 would report pages_requested=0 "
+                      "against pages_completed=1)")
+    if retries < 1:
+        errors.append("--retries must be at least 1: it is the number of "
+                      "attempts, not the number of RE-tries, so 0 would "
+                      "skip the fetch entirely and report nothing wrong")
+    if retry_delay < 0:
+        errors.append("--retry-delay cannot be negative")
+    if delay < 0:
+        errors.append("--delay cannot be negative")
+    if concurrency is not None and concurrency < 1:
+        errors.append("--concurrency must be at least 1")
+    if min_score is not None and not 0.0 <= min_score <= 1.0:
+        errors.append("--min-score is a reCAPTCHA v3 score and must be "
+                      "between 0.0 and 1.0")
+    return errors
 
 
 def session_attempts(mode: str, retries: int) -> int:

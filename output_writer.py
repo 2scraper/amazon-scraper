@@ -114,7 +114,28 @@ class Product:
     availability: Optional[str] = None
     bullets: Optional[List[str]] = None
     images: Optional[List[str]] = None
-    variations: Optional[List[str]] = None
+    # Variation columns, all four from the detail page's own variation state
+    # (`dimensions` / `variationDisplayLabels` / `dimensionValuesDisplayData`
+    # / `num_total_variations`) rather than from the twister's rendered
+    # markup. See product_parser._variation_state for why: the container the
+    # old `variations` column read is not on the page any more, and the one
+    # that replaced it is an empty mount point in the served HTML.
+    #
+    # Scalars rather than the whole variant table, because the table does not
+    # fit in a row: one measured product (Crocs Classic Clog, 2026-09-21)
+    # publishes 776 variants, and 776 objects in one CSV cell is not a
+    # column anyone can use. The table lives in `--mode variations`, one row
+    # per variant, the same way reviews got their own schema.
+    parent_asin: Optional[str] = None
+    # The dimensions this product varies over, as the site labels them for a
+    # human: ["Size", "Color"], ["Option", "Digital Storage Capacity", ...].
+    variation_dimensions: Optional[List[str]] = None
+    # The site's OWN count (`num_total_variations`), not len() of anything we
+    # extracted — so it can be compared against what we extracted, which is
+    # what makes the extraction self-checking instead of threshold-guessed.
+    variation_count: Optional[int] = None
+    # Which variant THIS row is, as "Label: value" pairs.
+    selected_variation: Optional[List[str]] = None
 
 
 @dataclass
@@ -252,6 +273,31 @@ EXIT_BLOCKED = 3
 # disappeared from the catalogue. See write_run_meta.
 EXIT_PARTIAL = 6
 
+# Exit code for a run that never GOT the page: a navigation timeout, a dead
+# or unauthenticated proxy, a DNS failure, or an edge answering with
+# something that is not the page that was asked for.
+#
+# Until this existed every one of those returned EXIT_NO_PRODUCTS, so a dead
+# proxy, a network flap and a search that genuinely matched nothing were one
+# value to an automated caller. Those want three different responses — retry
+# the same exit, change exit, accept the answer — and the caller had no way
+# to choose. Measured: a live run through a misconfigured proxy failed to
+# load for 60s and exited 4, the code documented as "ran fine, no products".
+#
+# 5 rather than a new number, and this is the part worth not re-litigating:
+# the family's exit-code contract already reserves 5 for "the transport
+# failed" (scraper_api_client has used it for a Scraper API error since it
+# was written), and the browser engines simply had no way to say the same
+# thing. Every repo in this family spells 4 as "ran, found nothing" and none
+# of them defines a 7, so widening 5 from "remote API error" to "the fetch
+# failed" keeps ONE meaning per code across the family instead of making
+# this repo the only one whose callers need a per-repo table.
+#
+# Deliberately NOT applied when rows were gathered: a timeout on page 7 of
+# 10 is a PARTIAL run (exit 6, output written), which is already right. This
+# only decides what a run holding nothing reports.
+EXIT_FETCH_FAILED = 5
+
 
 def write_run_meta(out_prefix: str, meta: dict) -> str:
     """Write a run-metadata sidecar next to the output, return its path.
@@ -268,6 +314,33 @@ def write_run_meta(out_prefix: str, meta: dict) -> str:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
     print(f"[+] Wrote run metadata -> {path} (status={meta.get('status')})")
+    return path
+
+
+def write_last_attempt(out_prefix: str, meta: dict) -> str:
+    """Record a run that wrote no output, under its OWN filename.
+
+    `finish_run` deliberately writes no `<out>.meta.json` for a failed run:
+    `save` leaves the previous good output in place, and a "failed" sidecar
+    beside good data would contradict it and make diff_runs.py refuse a
+    comparison of data that is in fact fine.
+
+    The cost of that, until this existed, was that a failed run left the
+    caller NOTHING to read — the exit code was the whole story, so "the proxy
+    died" and "the search matched nothing" were indistinguishable to anything
+    driving the scraper. A separate name is what lets both facts coexist:
+    `<out>.meta.json` keeps describing the last SUCCESSFUL output and
+    `<out>.last_attempt.json` describes the most recent attempt, whether or
+    not it produced anything.
+
+    It is overwritten every run, including successful ones, so it is never
+    stale: a `last_attempt` whose status is "complete" and whose
+    `finished_at` matches the sidecar means the last attempt is the last
+    success.
+    """
+    path = f"{out_prefix}.last_attempt.json"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
     return path
 
 
@@ -303,6 +376,22 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
         "pages_requested": pages_requested,
         "pages_completed": pages_completed,
         "pages_failed": pages_failed or [],
+        # How many ROWS the run wrote, and what one row is. `products` was
+        # the only name for years and is wrong for a mode whose rows are not
+        # products: a live reviews run recorded "products": 13 for thirteen
+        # reviews of ONE product, which reads as thirteen products to
+        # anything summing the field across runs.
+        #
+        # `record_type` is derived from the row class rather than written
+        # per mode, so a new mode cannot add a row type and forget to
+        # declare it here.
+        "records": products,
+        "record_type": ROW_CLASS_BY_MODE.get(mode, Product).__name__.lower(),
+        # Deprecated alias, kept because it has been in every sidecar this
+        # project has ever written and something is reading it. Identical to
+        # `records`, including for reviews, where both are equally the row
+        # count — the fix is the NAME, so silently changing what the old
+        # name means would be worse than leaving it wrong.
         "products": products,
         "start_url": start_url,
         "final_url": final_url,
@@ -334,12 +423,15 @@ def save(rows: Sequence[Any], out_prefix: str, fmt: str,
               f"Pass --allow-empty if an empty result is the expected answer.")
         return EXIT_NO_PRODUCTS
 
+    # The noun comes from the row class, so a reviews run does not report
+    # "Saved 13 products" for thirteen reviews of one product.
+    noun = row_cls.__name__.lower() + ("" if len(rows) == 1 else "s")
     if fmt in ("json", "both"):
         write_json(rows, f"{out_prefix}.json")
-        print(f"[+] Saved {len(rows)} products -> {out_prefix}.json")
+        print(f"[+] Saved {len(rows)} {noun} -> {out_prefix}.json")
     if fmt in ("csv", "both"):
         write_csv(rows, f"{out_prefix}.csv", row_cls=row_cls)
-        print(f"[+] Saved {len(rows)} products -> {out_prefix}.csv")
+        print(f"[+] Saved {len(rows)} {noun} -> {out_prefix}.csv")
     return 0 if rows else EXIT_NO_PRODUCTS
 
 
@@ -359,6 +451,25 @@ def save(rows: Sequence[Any], out_prefix: str, fmt: str,
 # --mode reviews read one page because one page is all there is.
 COMPLETE_STOP_REASONS = ("completed", "pagination_exhausted", "no_new_products",
                          "single_page_mode")
+
+
+# Stop reasons that mean the run never obtained the page, as opposed to
+# obtaining it and finding nothing on it. Kept as DATA next to the exit code
+# they map to, so an engine cannot invent a reason that silently falls
+# through to "no products" — the failure this list exists to prevent.
+#
+# The engines here currently only ever produce the first: a dead proxy is
+# detected (`_proxy_failure`) and rotates the exit, but it reaches the
+# sidecar as `page_load_timeout` like any other navigation failure. The other
+# two are listed anyway, spelled as the rest of the family spells them, so
+# splitting them later is a one-line change in the engine rather than a
+# silent fall-through here.
+#
+# "pages_unattempted" is deliberately NOT in this set. It is set when page 1
+# was fetched fine and the queue never drained, so a run holding no rows
+# under that reason really did get its page and really did find nothing.
+FETCH_FAILURE_STOP_REASONS = ("page_load_timeout", "proxy_unusable",
+                              "http_error")
 
 
 def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
@@ -383,19 +494,35 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
     rc = save(rows, out_prefix, fmt, allow_empty=allow_empty, row_cls=row_cls)
     wrote_output = bool(rows) or allow_empty
 
+    status = "complete" if (rows and complete) else (
+        "partial" if rows else "failed")
+    meta = run_meta(
+        status=status, stop_reason=stop_reason,
+        pages_requested=pages_requested, pages_completed=pages_completed,
+        pages_failed=pages_failed, mode=mode, source=source,
+        start_url=start_url, final_url=final_url, products=len(rows))
+
     if wrote_output:
-        status = "complete" if (rows and complete) else (
-            "partial" if rows else "failed")
-        write_run_meta(out_prefix, run_meta(
-            status=status, stop_reason=stop_reason,
-            pages_requested=pages_requested, pages_completed=pages_completed,
-            pages_failed=pages_failed, mode=mode, source=source,
-            start_url=start_url, final_url=final_url, products=len(rows)))
+        write_run_meta(out_prefix, meta)
+    # Always, and under its own name: see write_last_attempt for why this
+    # cannot be the same file.
+    write_last_attempt(out_prefix, meta)
 
     if not rows:
-        # Nothing gathered at all: a challenge outranks "empty result",
-        # because it says something stood between the run and the content.
-        return EXIT_BLOCKED if blocked else rc
+        # Nothing gathered at all, and the three reasons are not the same
+        # answer. Ordered by how much each one proves: a named challenge
+        # outranks a transport failure, which outranks "we got the page and
+        # it was empty" — the only one of the three that is really
+        # EXIT_NO_PRODUCTS.
+        if blocked:
+            return EXIT_BLOCKED
+        if stop_reason in FETCH_FAILURE_STOP_REASONS:
+            print(f"[!] The page was never fetched ({stop_reason}) — this is "
+                  f"exit {EXIT_FETCH_FAILED}, NOT an empty result "
+                  f"(exit {EXIT_NO_PRODUCTS}). Nothing can be concluded about "
+                  f"the catalogue from this run.")
+            return EXIT_FETCH_FAILED
+        return rc
     if not complete:
         print(f"[!] Partial run: stopped after {pages_completed} of "
               f"{pages_requested} page(s) ({stop_reason}). The output holds "

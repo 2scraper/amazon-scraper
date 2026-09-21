@@ -25,7 +25,10 @@
     "availability": null,
     "bullets": null,
     "images": null,
-    "variations": null
+    "parent_asin": null,
+    "variation_dimensions": null,
+    "variation_count": null,
+    "selected_variation": null
   },
   {
     "source": "amazon.com",
@@ -53,7 +56,10 @@
     "availability": null,
     "bullets": null,
     "images": null,
-    "variations": null
+    "parent_asin": null,
+    "variation_dimensions": null,
+    "variation_count": null,
+    "selected_variation": null
   },
   {
     "source": "amazon.com",
@@ -81,7 +87,10 @@
     "availability": null,
     "bullets": null,
     "images": null,
-    "variations": null
+    "parent_asin": null,
+    "variation_dimensions": null,
+    "variation_count": null,
+    "selected_variation": null
   },
   {
     "source": "amazon.com",
@@ -109,7 +118,10 @@
     "availability": null,
     "bullets": null,
     "images": null,
-    "variations": null
+    "parent_asin": null,
+    "variation_dimensions": null,
+    "variation_count": null,
+    "selected_variation": null
   },
   {
     "source": "amazon.com",
@@ -137,6 +149,9 @@
     "availability": null,
     "bullets": null,
     "images": null,
-    "variations": null
+    "parent_asin": null,
+    "variation_dimensions": null,
+    "variation_count": null,
+    "selected_variation": null
   }
 ]

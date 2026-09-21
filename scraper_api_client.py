@@ -83,14 +83,16 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 import time
 from typing import Optional
 
 import requests
 
-from product_parser import parse_products, detect_bot_challenge, BOT_CHALLENGE_MARKERS
-from output_writer import save
+from product_parser import (parse_products, detect_bot_challenge,
+                            marketplace_host, BOT_CHALLENGE_MARKERS)
+from output_writer import finish_run, EXIT_FETCH_FAILED
 import env_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -106,7 +108,11 @@ MAX_API_TIMEOUT = 120
 # is not the operator passing wrong arguments, and a harness that lumps them
 # together sends you looking in the wrong place. Run 7 reported `exit=2` for an
 # HTTP 422 from the API — which reads as "you called it wrong".
-EXIT_API_ERROR = 5
+# An alias, not a second declaration: "the remote API failed" and "the page
+# was never fetched" are the same fact to a caller, and output_writer is
+# where that code's meaning is written down. Spelling 5 here again is how the
+# two drift.
+EXIT_API_ERROR = EXIT_FETCH_FAILED
 
 def _mask_credentials(url: str) -> str:
     """Never print a username:password embedded in a ws://... or http://... URL."""
@@ -118,6 +124,39 @@ def _mask_credentials(url: str) -> str:
     scheme, rest = url[:scheme_sep + 3], url[scheme_sep + 3:]
     _, _, host_part = rest.partition("@")
     return f"{scheme}***:***@{host_part}"
+
+
+# Credentials embedded ANYWHERE in a blob of text, not just in a string that
+# is entirely a URL — and every occurrence, not the first. A masker that
+# handles one occurrence prints the password the other four times and looks
+# like it is working.
+_CREDS_IN_TEXT_RE = re.compile(r"([a-z][a-z0-9+.-]*://)[^/\s'\"@]+@", re.IGNORECASE)
+# Same shape as captcha_solver._KEY_IN_TEXT_RE and fingerprint_client's. A
+# third copy is one too many and they should be unified in a family pass;
+# reaching into another module's private name to avoid it would be worse.
+_KEY_IN_TEXT_RE = re.compile(
+    r"((?:client)?key|token|api[_-]?key)=([^&\s'\"]{6,})", re.IGNORECASE)
+
+
+def _redact_debug_header(value: str) -> str:
+    """The x-debug header, safe to log.
+
+    SECURITY.md names this header as one of three places credentials reach a
+    log unmasked, and it was logged verbatim: the API echoes back the task it
+    ran, so a run driven through a credentialed `cdpurl` put that URL's
+    username and password into the log, and a key passed as a query parameter
+    would go the same way.
+
+    Redaction rather than an allowlist of fields, deliberately: the header is
+    the API's own metadata and its shape is not ours to pin, so an allowlist
+    would silently drop the cost and timing figures this is logged FOR the
+    first time the API adds a field. The trade is that a credential in a
+    shape neither pattern knows would survive — so the patterns are global
+    and the check beside them uses realistic fixtures rather than the two
+    literals that happen to appear here today.
+    """
+    return _KEY_IN_TEXT_RE.sub(r"\1=***",
+                               _CREDS_IN_TEXT_RE.sub(r"\1***:***@", value))
 
 
 def _build_wait_for(args) -> Optional[str]:
@@ -173,7 +212,7 @@ def fetch_html(args) -> str:
     # cost of the call shows up.
     debug = resp.headers.get("x-debug")
     if debug:
-        logger.info("x-debug: %s", debug)
+        logger.info("x-debug: %s", _redact_debug_header(debug))
 
     if resp.status_code != 200:
         # 422 = task ran but errored (this is what a bad/unreachable
@@ -188,6 +227,30 @@ def fetch_html(args) -> str:
     upstream_status = body.get("status")
     logger.info("Upstream page status %s, %d bytes of HTML.", upstream_status, len(html))
     return html
+
+
+def _finish(rows, args, *, blocked: bool, stop_reason: str) -> int:
+    """Every outcome of this client, through the same decision the engines use.
+
+    It used to call `save` and hand-spell its own 3 and 4, which meant a
+    Scraper API run wrote no run-metadata sidecar at all: a consumer could
+    read the rows but could not learn the status, the stop reason or the
+    marketplace, and had no way to tell an empty result from a challenge
+    page except by reading the log. The browser engines have had that since
+    finish_run existed.
+
+    This does NOT make it a fourth engine — it still fetches exactly one
+    page and still has no pagination, which is why `stop_reason` is
+    `single_page_mode` on success. It makes its OUTPUT honest, which is a
+    smaller claim and the one worth making now.
+    """
+    return finish_run(rows, args.out, args.format, args.allow_empty,
+                      blocked=blocked, stop_reason=stop_reason,
+                      # One page, always: there is no --pages here.
+                      pages_requested=1,
+                      pages_completed=1 if rows else 0,
+                      mode="listing", source=marketplace_host(args.url),
+                      start_url=args.url, final_url=args.url)
 
 
 def main() -> int:
@@ -219,12 +282,12 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
         html = fetch_html(args)
     except requests.RequestException as e:
         logger.error("Network error talking to the Scraper API: %s", e)
-        return EXIT_API_ERROR
+        return _finish([], args, blocked=False, stop_reason="http_error")
     except RuntimeError as e:
         # HTTP 4xx/5xx from the API, including the 422 that a busy or
         # unreachable cdpurl produces.
         logger.error("%s", e)
-        return EXIT_API_ERROR
+        return _finish([], args, blocked=False, stop_reason="http_error")
 
     if args.dump_html:
         with open(args.dump_html, "w", encoding="utf-8") as f:
@@ -241,7 +304,8 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
                      "anything (--retries). This site needs a rendered browser in the "
                      "path: pass --cdp-url, or use playwright_scraper.py / "
                      "puppeteer_scraper.py directly.")
-        return 3
+        return _finish([], args, blocked=True,
+                       stop_reason="blocked_%s" % vendor)
 
     products = parse_products(html, args.url, category=args.category)
     logger.info("Parsed %d products.", len(products))
@@ -252,9 +316,9 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
             f.write(html)
         logger.warning("0 products parsed — saved the raw response to %s so you can see "
                        "what actually came back.", dump)
-        return 4
+        return _finish([], args, blocked=False, stop_reason="completed")
 
-    return save(products, args.out, args.format, allow_empty=args.allow_empty)
+    return _finish(products, args, blocked=False, stop_reason="single_page_mode")
 
 
 def parse_args():
