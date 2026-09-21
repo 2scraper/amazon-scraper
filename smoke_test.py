@@ -46,6 +46,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import textwrap
 import types
 from dataclasses import fields
 
@@ -1913,6 +1914,54 @@ def test_sample_output():
 
 
 # ---------------------------------------------------------------------------
+def test_workflow_inline_python_compiles():
+    """The Python embedded in a workflow's heredoc must at least parse.
+
+    Both canary jobs assert their results with `python3 - <<'EOF'` inline in
+    the YAML, and nothing checked those bytes until a runner executed them.
+    A syntax error there costs a full dispatch to discover — install
+    Playwright, fetch pages, THEN crash on the assertions — and on the
+    scheduled job it reads as a site-side failure rather than as a typo.
+
+    Deliberately regex-and-dedent rather than a YAML parse: PyYAML is not a
+    dependency of this project (requirements.txt is beautifulsoup4 and
+    requests) and adding one so a test can read a workflow would be the
+    wrong trade. A block scalar's common indentation is what dedent removes,
+    which is the only YAML fact this needs to know.
+
+    It asserts it FOUND blocks as well as that they compile: a check that
+    silently scans nothing passes for the wrong reason, which is how a guard
+    quietly stops guarding once its input moves.
+    """
+    group("inline Python in the workflows compiles")
+    ok = True
+    wf_dir = os.path.join(REPO_ROOT, ".github", "workflows")
+    ok &= check(".github/workflows is present", os.path.isdir(wf_dir))
+    if not os.path.isdir(wf_dir):
+        return False
+
+    found = 0
+    for name in sorted(os.listdir(wf_dir)):
+        if not name.endswith((".yml", ".yaml")):
+            continue
+        text = open(os.path.join(wf_dir, name), encoding="utf-8").read()
+        for m in re.finditer(r"python3? - <<'(\w+)'\n(.*?)\n[ \t]*\1\b",
+                             text, re.S):
+            found += 1
+            body = textwrap.dedent(m.group(2))
+            label = "%s block %d" % (name, found)
+            try:
+                compile(body, label, "exec")
+                ok &= check("%s parses" % label, True)
+            except SyntaxError as exc:
+                ok &= check("%s parses (%s line %s)"
+                            % (label, exc.msg, exc.lineno), False)
+
+    ok &= check("...and there were blocks to check (found %d)" % found,
+                found >= 2)
+    return ok
+
+
 def test_ci_checks_is_actually_wired_up():
     group("the shipped CI checks run, and pass on this repo")
     ok = True
@@ -2037,6 +2086,7 @@ def main() -> int:
     ok &= test_engines(skips)
     ok &= test_no_capture_leaks()
     ok &= test_ci_checks_is_actually_wired_up()
+    ok &= test_workflow_inline_python_compiles()
     ok &= test_fingerprint_client_reads_env()
     ok &= test_wording()
     ok &= test_shared_calls_bind_against_the_real_signature()

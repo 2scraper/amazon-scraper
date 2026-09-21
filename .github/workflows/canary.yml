@@ -212,3 +212,128 @@ jobs:
             canary_run_page*_debug.*
           if-no-files-found: ignore
           retention-days: 14
+
+  # ---------------------------------------------------------------------
+  # The variation columns, on a real detail page.
+  #
+  # Why this job exists: `variations` read the rendered twister and was null
+  # on every row of every run for as long as the column existed. Nothing
+  # noticed, because a detail page was never fetched by CI and there was no
+  # twister fixture — a column silently returning null is invisible to a
+  # coverage check and to a green offline suite alike. The offline fixture
+  # (smoke_test.FIX_VARIATION_STATE) pins the parse; this pins that the
+  # SITE still publishes what that fixture was carved from.
+  #
+  # DISPATCH-ONLY on purpose, and it must stay that way until someone runs
+  # it from the default branch and sees which way it goes. A /dp/ page was
+  # served to a plain HTTP client from a datacenter address on 2026-09-21
+  # (3 of 3, HTTP 200), which is a reason to expect this to pass from a
+  # runner and NOT evidence that it does — GitHub's addresses are not that
+  # address. Putting an unverified job on a schedule is how a badge goes
+  # permanently red, and a check that is always red teaches everyone to
+  # ignore checks.
+  #
+  # To promote it: merge, `gh workflow run canary.yml` (workflow_dispatch
+  # needs the workflow to exist on the DEFAULT branch, or it answers a 404
+  # that reads like a filename typo), confirm green twice, then add it to
+  # the schedule above. If it proves refused from runners, gate its steps on
+  # AMAZON_PROXY the way the header describes and let it SKIP with a
+  # ::notice:: when the secret is absent.
+  variation-canary:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Playwright engine
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      - name: Read a real multi-variant product page
+        id: run
+        # Crocs Classic Clog, pinned because it is about as durable as an
+        # Amazon listing gets (a staple sold for over a decade) and because
+        # it carried the largest variant count measured while this was
+        # written: 776 over Size and Color on 2026-09-21. A pinned ASIN can
+        # still be delisted, which would show up here as exit 4 — see the
+        # interpretation step.
+        continue-on-error: true
+        env:
+          AMAZON_PROXY: ${{ secrets.AMAZON_PROXY }}
+        run: |
+          set +e
+          python3 playwright_scraper.py --mode product \
+            --url "https://www.amazon.com/dp/B0014C2NBC" \
+            --out variation_run --dump-html variation_run.html
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Interpret the exit code
+        run: |
+          code="${{ steps.run.outputs.exit_code }}"
+          case "$code" in
+            0)   echo "OK — the detail page was read." ;;
+            3)   echo "::error::Blocked before parsing (exit 3) — may be this runner's address rather than a site change." ;;
+            4)   echo "::error::The page was served but no product parsed (exit 4). Either the pinned ASIN is gone, or the detail parser broke." ;;
+            5)   echo "::error::The page was never fetched (exit 5) — transport, more likely this runner's network than the site." ;;
+            *)   echo "::error::Unexpected exit code $code (see the step above)." ;;
+          esac
+          [ "$code" = "0" ]
+
+      - name: Assert the variation columns are actually populated
+        run: |
+          python3 - <<'EOF'
+          import json
+          import sys
+
+          rows = json.load(open("variation_run.json"))
+          assert len(rows) == 1, "expected one product row, got %d" % len(rows)
+          r = rows[0]
+
+          fail = []
+          for column in ("parent_asin", "variation_dimensions",
+                         "variation_count", "selected_variation"):
+              if r.get(column) in (None, [], ""):
+                  fail.append("%s is empty" % column)
+
+          # A floor, not the measured figure. 776 was true on 2026-09-21 and
+          # a catalogue legitimately changes size, so asserting it would make
+          # this job fail for the site doing something normal. What is NOT
+          # normal is a multi-variant product reporting one variant: that is
+          # the shape the old column's failure took.
+          count = r.get("variation_count")
+          if isinstance(count, int) and count < 2:
+              fail.append("variation_count is %d on a product picked for "
+                          "having many variants — this is what the extraction "
+                          "silently returning nothing looks like" % count)
+
+          # One label per dimension, or the two halves of the state have
+          # stopped lining up and the pairing is meaningless.
+          dims, selected = r.get("variation_dimensions"), r.get("selected_variation")
+          if isinstance(dims, list) and isinstance(selected, list) \
+                  and len(dims) != len(selected):
+              fail.append("%d dimensions but %d selected values"
+                          % (len(dims), len(selected)))
+
+          if fail:
+              print("::error::variation columns: " + "; ".join(fail))
+              sys.exit(1)
+          print("canary OK: %s, %s variants over %s"
+                % (r["sku"], count, ", ".join(dims)))
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: variation-canary
+          path: |
+            variation_run.json
+            variation_run.meta.json
+            variation_run.last_attempt.json
+            variation_run.html
+          if-no-files-found: warn
