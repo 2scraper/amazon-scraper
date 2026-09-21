@@ -1,0 +1,399 @@
+name: weekly
+
+# The daily canary (canary.yml) covers ONE path: a listing run on amazon.com
+# through Playwright. That is the right thing to run every morning — it is
+# the README's headline claim and it is cheap — but it leaves most of the
+# repo unexercised against the live site, and the two defects that made this
+# workflow necessary were both invisible to it:
+#
+#   * `variations` returned null on every product run for as long as the
+#     column existed. No detail page was ever fetched by CI.
+#   * pyppeteer rotated a proxy exit on an ordinary timeout while its twins
+#     did not. No engine but Playwright was ever run live.
+#
+# So this is the broader, slower half: every mode, a second marketplace, and
+# the two non-primary engines. Weekly rather than daily because it is six
+# runner-jobs against a site that throttles, and because the things it
+# catches are slow decay rather than an outage.
+#
+# NOT on a schedule yet, and that is deliberate — see the block above
+# variation-canary in canary.yml for the same reasoning written out. Nobody
+# has watched these jobs go green, and a live job that has never been
+# watched does not belong on a cron: a badge that is red every Monday
+# teaches everyone to ignore it. The evidence available at the time of
+# writing (2026-09-21) is narrow and worth stating exactly:
+#
+#     listing, Playwright, amazon.com, from a runner    green (daily canary)
+#     product, Playwright, amazon.com, from a runner    green (variation canary)
+#     /dp/ to a plain HTTP client, datacenter address   3 of 3, HTTP 200
+#     /s? to a plain HTTP client, same address          HTTP 503 every time
+#
+# Nothing there says anything about reviews, bestsellers, a second
+# marketplace, Selenium or pyppeteer from a GitHub address.
+#
+# To promote it: merge, `gh workflow run weekly.yml` (workflow_dispatch
+# needs the workflow on the DEFAULT branch, or it answers a 404 that reads
+# like a filename typo), then read what actually happened per job. Add the
+# schedule below for the jobs that pass, and for any that are refused from
+# runners either gate them on the AMAZON_PROXY secret with a ::notice:: skip
+# — the pattern canary.yml's header describes — or drop them and say why.
+#
+#   schedule:
+#     - cron: "41 5 * * 1"    # Mondays, off the hour
+
+on:
+  workflow_dispatch:
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Every mode, not just the one the daily canary runs.
+  modes:
+    strategy:
+      # Independent questions: one mode being refused should not hide the
+      # answer for the other two.
+      fail-fast: false
+      matrix:
+        include:
+          - mode: product
+            url: "https://www.amazon.com/dp/B07K5214NZ"
+          - mode: reviews
+            url: "https://www.amazon.com/dp/B07K5214NZ"
+          - mode: listing
+            url: "https://www.amazon.com/gp/bestsellers/electronics/"
+            label: bestsellers
+    name: "mode: ${{ matrix.label || matrix.mode }}"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Playwright engine
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      - name: Run
+        id: run
+        # set +e: Actions runs `run:` under `bash -e`, so a non-zero exit
+        # aborts the step before the line that records it. continue-on-error
+        # stops the step failing the job; it does not touch errexit.
+        continue-on-error: true
+        env:
+          AMAZON_PROXY: ${{ secrets.AMAZON_PROXY }}
+        run: |
+          set +e
+          python3 playwright_scraper.py --mode "${{ matrix.mode }}" \
+            --url "${{ matrix.url }}" \
+            --out weekly_run --dump-html weekly_run.html
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Interpret the exit code
+        run: |
+          code="${{ steps.run.outputs.exit_code }}"
+          case "$code" in
+            0)   echo "OK — the page was read." ;;
+            3)   echo "::error::Blocked before parsing (exit 3). May be this runner's datacenter address rather than a site change — weekly_run.last_attempt.json names the stop_reason." ;;
+            4)   echo "::error::Served, but nothing parsed (exit 4) on a URL known to have content. This is the shape a real site-side break takes." ;;
+            5)   echo "::error::The page was never fetched (exit 5) — transport. More likely this runner's network than the site." ;;
+            6)   echo "::error::Partial run (exit 6)." ;;
+            *)   echo "::error::Unexpected exit code $code." ;;
+          esac
+          [ "$code" = "0" ]
+
+      - name: Check the rows are the shape this mode promises
+        run: |
+          python3 - <<'EOF'
+          import json
+          import sys
+
+          mode = "${{ matrix.mode }}"
+          rows = json.load(open("weekly_run.json"))
+          meta = json.load(open("weekly_run.meta.json"))
+          fail = []
+
+          if not rows:
+              fail.append("no rows at all")
+          if meta.get("mode") != mode:
+              fail.append("sidecar says mode=%r, asked for %r"
+                          % (meta.get("mode"), mode))
+
+          if mode == "reviews":
+              # A dozen or so is what a /dp/ page renders anonymously; the
+              # paginated history needs an account, so there is no --pages
+              # here and no point asserting a large number. What matters is
+              # that a review carries the fields that make it a review.
+              if meta.get("record_type") != "review":
+                  fail.append("record_type is %r, not 'review'"
+                              % meta.get("record_type"))
+              bodied = [r for r in rows if r.get("review_id") and r.get("body")]
+              if len(bodied) < 3:
+                  fail.append("%d of %d reviews have both an id and a body"
+                              % (len(bodied), len(rows)))
+              # Amazon serves a /dp/ variant whose review widget is present
+              # and empty, and it is sticky within a session. The engine has
+              # its own retry budget for exactly that, so reaching here with
+              # zero rows means the budget was spent, not that the page has
+              # no reviews.
+          elif mode == "product":
+              r = rows[0]
+              for column in ("sku", "title"):
+                  if not r.get(column):
+                      fail.append("%s is empty on the product row" % column)
+          else:
+              # The best-seller grid numbers its own items, so a gap is
+              # arithmetic rather than a guess: 30 rows spanning ranks 1-50
+              # proves 20 cards never loaded.
+              if len(rows) < 20:
+                  fail.append("only %d rows off a best-seller grid" % len(rows))
+              pairs = [(r.get("page"), r.get("position")) for r in rows]
+              if len(set(pairs)) != len(pairs):
+                  fail.append("page+position is not unique across the run")
+
+          if fail:
+              print("::error::%s: %s" % (mode, "; ".join(fail)))
+              sys.exit(1)
+          print("weekly OK: %s, %d rows" % (mode, len(rows)))
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: weekly-mode-${{ matrix.label || matrix.mode }}
+          path: |
+            weekly_run.json
+            weekly_run.meta.json
+            weekly_run.last_attempt.json
+            weekly_run.html
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------
+  # A second marketplace. The rule this exists for: running one country site
+  # teaches you one country site. On a sibling repo the second one found two
+  # bugs the first could never show — a host that answers without `www.`,
+  # and a title parsed as a counter because the local word for "of" collided
+  # with the pattern.
+  #
+  # The assertion is the CURRENCY, because it is the one column a second
+  # marketplace can be wrong about while every other column still looks
+  # right, and because it must come from the site rather than from a
+  # default: a guessed "USD" on amazon.de is exactly the shape of the bug.
+  marketplaces:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The query is per-marketplace on purpose. A German term sent to
+          # amazon.co.uk still returns something — the search is fuzzy —
+          # which is worse than failing, because the run looks fine while
+          # exercising a query no user of that site would type.
+          - host: amazon.de
+            currency: EUR
+            query: "bluetooth+kopfhoerer"
+          - host: amazon.co.uk
+            currency: GBP
+            query: "bluetooth+headphones"
+    name: "marketplace: ${{ matrix.host }}"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Playwright engine
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      - name: Run
+        id: run
+        continue-on-error: true
+        env:
+          AMAZON_PROXY: ${{ secrets.AMAZON_PROXY }}
+        run: |
+          set +e
+          python3 playwright_scraper.py \
+            --url "https://www.${{ matrix.host }}/s?k=${{ matrix.query }}" \
+            --pages 2 --out weekly_run --dump-html weekly_run.html
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Interpret the exit code
+        run: |
+          code="${{ steps.run.outputs.exit_code }}"
+          case "$code" in
+            0)   echo "OK — ${{ matrix.host }} served a listing." ;;
+            3)   echo "::error::Blocked (exit 3) on ${{ matrix.host }}. Some marketplaces refuse a datacenter address that another accepts — that is a finding, not noise, but it is about the address." ;;
+            4)   echo "::error::Served, nothing parsed (exit 4) on ${{ matrix.host }} — the shape of a per-marketplace markup difference." ;;
+            5)   echo "::error::Never fetched (exit 5) — transport." ;;
+            6)   echo "::error::Partial run (exit 6)." ;;
+            *)   echo "::error::Unexpected exit code $code." ;;
+          esac
+          [ "$code" = "0" ]
+
+      - name: The currency must be the site's, not a default
+        run: |
+          python3 - <<'EOF'
+          import collections
+          import json
+          import sys
+
+          host = "${{ matrix.host }}"
+          expected = "${{ matrix.currency }}"
+          rows = json.load(open("weekly_run.json"))
+          meta = json.load(open("weekly_run.meta.json"))
+          fail = []
+
+          if meta.get("source") != host:
+              fail.append("sidecar source is %r, not %r"
+                          % (meta.get("source"), host))
+
+          seen = collections.Counter(r.get("currency") for r in rows
+                                     if r.get("price") is not None)
+          if not seen:
+              fail.append("no row carries a price, so the currency is untested")
+          else:
+              wrong = {c: n for c, n in seen.items() if c != expected}
+              if wrong:
+                  fail.append("priced rows report %r; expected %s only"
+                              % (wrong, expected))
+
+          if fail:
+              print("::error::%s: %s" % (host, "; ".join(fail)))
+              sys.exit(1)
+          print("weekly OK: %s, %d rows, %d priced, all %s"
+                % (host, len(rows), sum(seen.values()), expected))
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: weekly-marketplace-${{ matrix.host }}
+          path: |
+            weekly_run.json
+            weekly_run.meta.json
+            weekly_run.last_attempt.json
+            weekly_run.html
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------
+  # The two engines that are not Playwright, against the live site.
+  #
+  # "Mirror them exactly" is a design rule, not a verification. Every defect
+  # this family has found in a non-primary engine — a NameError on a line
+  # only a fetch reaches, a proxy rotation on the wrong condition — was
+  # invisible to import, --help, compileall and a green offline suite, and
+  # showed up in the first minute of a real run.
+  #
+  # Two pages, not one: with a single page the pagination path is never
+  # exercised, which is how a dead next-page selector once shipped as a
+  # complete-looking success holding a third of the data.
+  engines:
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [selenium, puppeteer]
+    name: "engine: ${{ matrix.engine }}"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install this engine only
+        # One engine per environment, from its own requirements file: the
+        # three declare mutually unsatisfiable pins, and installing them
+        # together lets pip resolve the conflict by reaching for whatever it
+        # can — which is how CI once ran green against a stub version of
+        # pyppeteer that the repo does not support.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-${{ matrix.engine }}.txt
+          pip check
+
+      - name: Show the browser this engine will drive
+        # No install step: pyppeteer downloads its own Chromium on first
+        # launch, and Selenium drives the system Chrome plus chromedriver
+        # that the runner image already carries. Printing the versions is
+        # not decoration — when one of these jobs goes red, "which browser
+        # was it actually driving" is the first question, and the answer is
+        # otherwise nowhere in the log.
+        run: |
+          google-chrome --version || echo "no system Chrome on this runner"
+          chromedriver --version || echo "no chromedriver on this runner"
+
+      - name: Run two pages
+        id: run
+        continue-on-error: true
+        env:
+          AMAZON_PROXY: ${{ secrets.AMAZON_PROXY }}
+        run: |
+          set +e
+          python3 ${{ matrix.engine }}_scraper.py \
+            --url "https://www.amazon.com/s?k=bluetooth+headphones&i=electronics" \
+            --pages 2 --out weekly_run --dump-html weekly_run.html
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Interpret the exit code
+        run: |
+          code="${{ steps.run.outputs.exit_code }}"
+          case "$code" in
+            0)   echo "OK — ${{ matrix.engine }} ran live." ;;
+            1)   echo "::error::CRASH (exit 1) in ${{ matrix.engine }}. This is the one exit code here that is never about the address: a traceback on a line only a live fetch reaches is exactly what this job exists to find." ;;
+            3)   echo "::error::Blocked (exit 3) — may be this runner's address." ;;
+            4)   echo "::error::Served, nothing parsed (exit 4)." ;;
+            5)   echo "::error::Never fetched (exit 5) — transport." ;;
+            6)   echo "::error::Partial run (exit 6) — page 2 did not complete, so this engine's pagination is the first thing to read." ;;
+            *)   echo "::error::Unexpected exit code $code." ;;
+          esac
+          [ "$code" = "0" ]
+
+      - name: Two pages, and rows that agree with the primary engine's shape
+        run: |
+          python3 - <<'EOF'
+          import json
+          import sys
+
+          engine = "${{ matrix.engine }}"
+          rows = json.load(open("weekly_run.json"))
+          meta = json.load(open("weekly_run.meta.json"))
+          fail = []
+
+          if meta.get("pages_completed", 0) < 2:
+              fail.append("pages_completed=%s of 2 (stop_reason=%s)"
+                          % (meta.get("pages_completed"), meta.get("stop_reason")))
+          if meta.get("status") != "complete":
+              fail.append("status=%r" % meta.get("status"))
+          if len(rows) < 20:
+              fail.append("only %d rows over two pages" % len(rows))
+
+          # page+position must be unique across a multi-page run: position
+          # restarts at 1 on each page, so a page number that never gets
+          # threaded into the parser makes half the rows claim a position
+          # another row already has.
+          pairs = [(r.get("page"), r.get("position")) for r in rows]
+          if len(set(pairs)) != len(pairs):
+              fail.append("page+position repeats — the page number is not "
+                          "reaching the parser")
+          if len({r.get("page") for r in rows}) < 2:
+              fail.append("every row claims the same page")
+
+          if fail:
+              print("::error::%s: %s" % (engine, "; ".join(fail)))
+              sys.exit(1)
+          print("weekly OK: %s, %d rows over %s pages"
+                % (engine, len(rows), meta.get("pages_completed")))
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: weekly-engine-${{ matrix.engine }}
+          path: |
+            weekly_run.json
+            weekly_run.meta.json
+            weekly_run.last_attempt.json
+            weekly_run.html
+          if-no-files-found: warn

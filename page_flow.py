@@ -285,6 +285,44 @@ VARIANT_REROLL_ATTEMPTS = 5
 HYDRATE_ATTEMPTS = {"reviews": 1}
 
 
+# Chromium's own names for "the proxy is the problem, not the site". Matched
+# on an exception's TEXT because every driver here surfaces them as a generic
+# error: Playwright as `Error`, Selenium inside a WebDriverException, and
+# pyppeteer as one of several types.
+#
+# Here rather than three times over, which is how it was: each engine
+# declared its own copy of this tuple and inlined its own match. They were
+# byte-identical when this was written, and a tuple that three files must
+# keep identical is a drift waiting to happen — the same argument that put
+# the retry and page-state policy in this module.
+PROXY_ERROR_MARKERS = (
+    "ERR_PROXY_CONNECTION_FAILED",     # nothing listening / refused
+    "ERR_TUNNEL_CONNECTION_FAILED",    # CONNECT rejected by the proxy
+    "ERR_PROXY_AUTH_UNSUPPORTED",      # auth scheme we cannot satisfy
+    "ERR_PROXY_AUTH_REQUESTED",        # credentials missing or wrong
+    "ERR_UNEXPECTED_PROXY_AUTH",
+    "ERR_PROXY_CERTIFICATE_INVALID",
+)
+
+
+def proxy_failure(exc) -> str:
+    """The Chromium proxy-error name in `exc`, or "" if it is not one.
+
+    Telling this apart from an ordinary timeout is the whole point, because
+    the two want OPPOSITE responses: a timeout deserves another try at the
+    same exit, while an unusable exit deserves a different one — retrying it
+    unchanged just spends the budget on a proxy that is not going to answer.
+
+    Takes the exception (or anything str()-able) rather than pre-extracted
+    text, so no caller can forget to stringify a driver's exception type.
+    """
+    text = str(exc)
+    for marker in PROXY_ERROR_MARKERS:
+        if marker in text:
+            return marker
+    return ""
+
+
 def numeric_arg_errors(*, pages: int, retries: int, retry_delay: float,
                        delay: float, concurrency: Optional[int] = None,
                        min_score: Optional[float] = None) -> List[str]:

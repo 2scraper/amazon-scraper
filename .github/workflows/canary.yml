@@ -224,23 +224,22 @@ jobs:
   # (smoke_test.FIX_VARIATION_STATE) pins the parse; this pins that the
   # SITE still publishes what that fixture was carved from.
   #
-  # DISPATCH-ONLY on purpose, and it must stay that way until someone runs
-  # it from the default branch and sees which way it goes. A /dp/ page was
-  # served to a plain HTTP client from a datacenter address on 2026-09-21
-  # (3 of 3, HTTP 200), which is a reason to expect this to pass from a
-  # runner and NOT evidence that it does — GitHub's addresses are not that
-  # address. Putting an unverified job on a schedule is how a badge goes
-  # permanently red, and a check that is always red teaches everyone to
-  # ignore checks.
+  # Ran dispatch-only first, because a job nobody has watched go green does
+  # not belong on a schedule — an unverified live job going red every
+  # morning is how everyone learns to ignore a badge. Promoted on evidence:
+  # two manual dispatches from GitHub runners with no proxy and no secret,
+  # 2026-09-21, both green.
   #
-  # To promote it: merge, `gh workflow run canary.yml` (workflow_dispatch
-  # needs the workflow to exist on the DEFAULT branch, or it answers a 404
-  # that reads like a filename typo), confirm green twice, then add it to
-  # the schedule above. If it proves refused from runners, gate its steps on
-  # AMAZON_PROXY the way the header describes and let it SKIP with a
-  # ::notice:: when the secret is absent.
+  # Those two runs are also why the assertion is a FLOOR and not the
+  # measured figure. The same product reported 776 variants from a
+  # workstation, then 744, then 745 from the runners ten minutes apart — one
+  # product, three numbers, two hours. A canary pinned to any of them would
+  # go red for the catalogue behaving normally.
+  #
+  # If it does start being refused from runners, gate its steps on
+  # AMAZON_PROXY the way this file's header describes and let it SKIP with a
+  # ::notice:: when the secret is absent, rather than leaving it red.
   variation-canary:
-    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
