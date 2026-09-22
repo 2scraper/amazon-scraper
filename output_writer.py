@@ -489,7 +489,20 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
     does not overwrite) — the two files would contradict each other, and
     diff_runs.py would refuse to compare data that is in fact fine.
     """
-    complete = stop_reason in COMPLETE_STOP_REASONS
+    # Completeness is decided by the reason AND by the evidence. A named
+    # list of stop reasons cannot cover a failure recorded somewhere else,
+    # and `pages_failed` is somewhere else: a run whose loop ended for a
+    # COMPLETE reason while individual pages failed reported exit 0 and
+    # `status: complete` with a non-empty `pages_failed` in the same
+    # sidecar — a file that contradicts itself, and a pipeline branching
+    # on `status` reading a short run as a whole one.
+    #
+    # Found by a third-party audit of a sibling repo and measured across
+    # the family by CALLING each `finish_run` rather than grepping for the
+    # fix: 28 of 32 repos behaved this way. Same shape as the exit-code
+    # unification this file already carries — a rule keyed on a list of
+    # names has a hole for every name nobody added to it.
+    complete = stop_reason in COMPLETE_STOP_REASONS and not pages_failed
     row_cls = ROW_CLASS_BY_MODE.get(mode, Product)
     rc = save(rows, out_prefix, fmt, allow_empty=allow_empty, row_cls=row_cls)
     wrote_output = bool(rows) or allow_empty
