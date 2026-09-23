@@ -2126,6 +2126,61 @@ def test_ci_checks_is_actually_wired_up():
     return ok
 
 
+def test_scraper_api_sends_waitfor_as_an_object_and_reads_http_code():
+    """Measured 2026-09-23 against the live Scraper API: a JSON-encoded
+    STRING waitFor is answered HTTP 422 and still billed, an object is
+    answered 200; and the target's status is `http_code`, while `status` is
+    the API's own verdict ("success"). Driven through the real fetch_html
+    with requests.post stubbed -- no network. This engine does not return
+    the status, only logs it, so the log record is what is asserted."""
+    group("Scraper API payload and target status")
+    import logging
+    import types
+    import scraper_api_client as sac
+    sent = {}
+    records = []
+
+    class _Resp:
+        status_code = 200
+        headers = {}
+        text = ""
+
+        def json(self):
+            return {"status": "success", "http_code": 403, "headers": {},
+                    "body": "<html></html>"}
+
+    def _post(url, **kw):
+        sent.update(kw.get("json") or {})
+        return _Resp()
+
+    class _Grab(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    args = types.SimpleNamespace(
+        url="https://www.amazon.com/s?k=wireless+headphones", key="k" * 8,
+        timeout=60, cdp_url=None, wait_text="results", wait_element=None,
+        wait_state=None)
+    grab = _Grab()
+    sac.logger.addHandler(grab)
+    real_post = sac.requests.post
+    sac.requests.post = _post
+    try:
+        sac.fetch_html(args)
+    finally:
+        sac.requests.post = real_post
+        sac.logger.removeHandler(grab)
+    upstream = [r.args[0] for r in records
+                if "Upstream page" in str(r.msg) and r.args]
+    ok = check("Scraper API: --wait-text sends waitFor as an OBJECT, not a JSON "
+               "string (422 + billed, 2026-09-23) -- got %r" % (sent.get("waitFor"),),
+               sent.get("waitFor") == {"text": "results"})
+    ok &= check("Scraper API: the target status it reads is http_code (403), "
+                "not the API's 'success' -- got %r" % (upstream,),
+                upstream == [403] and isinstance(upstream[0], int))
+    return ok
+
+
 def main() -> int:
     ok = True
     # Checks that could not run because an optional engine library is absent.
@@ -2153,6 +2208,7 @@ def main() -> int:
     ok &= test_numeric_arg_validation()
     ok &= test_scraper_api_never_logs_a_credential()
     ok &= test_scraper_api_exit_contract()
+    ok &= test_scraper_api_sends_waitfor_as_an_object_and_reads_http_code()
     ok &= test_proxy_failure_semantics()
     ok &= test_env_config()
     ok &= test_proxy_pool()
