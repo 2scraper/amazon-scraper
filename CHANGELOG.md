@@ -115,6 +115,17 @@ one, and when it does the release notes say so first.
 
 ### Fixed
 
+- **The Scraper API path (`scraper_api_client.py`) failed whenever a wait flag
+  was given, and never saw the target's status.** Measured 2026-09-23 against
+  the live `/tasks/sync` endpoint: `waitFor` sent as a JSON-encoded string
+  (what this client sent) is answered HTTP 422 "params.waitFor must be an
+  object" and is still billed ($0.0005); sent as an object it is answered
+  HTTP 200. It is now an object. And the response's `status` is the API's own
+  verdict ("success"), while the target site's HTTP code is `http_code` — the
+  client logged `status`, so a target 403/503 read "success" in the log (this
+  engine logs the status and does not classify on it). It now reads
+  `http_code`, falling back to `status` only if that is an integer. After the fix, one live call (`--wait-text results` on the README's search URL) answered HTTP 200, upstream 200, 16 rows, status complete.
+
 - **The Scraper API's `x-debug` response header is redacted before it is
   logged.** `SECURITY.md` names that header as one of three places
   credentials reach a log unmasked, and the client logged it whole: the API
