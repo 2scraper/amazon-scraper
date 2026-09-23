@@ -11,9 +11,8 @@ answer this in one look.
 | What the dump shows | Cause |
 |---|---|
 | A challenge or "verify you are human" page | Bot management. Use a browser engine (not a plain HTTP fetch), a residential IP, or a remote browser via `--cdp-endpoint`. |
-| A real page, prices visible, still 0 rows | The JSON-LD path found nothing and the CSS fallback did not match. Check that product links still match `-item-<digits>.aspx`. |
+| A real page, prices visible, still 0 rows | The page kind's data-attribute anchor (`[data-asin]`, `[id^="p13n-asin-index-"]`, `[data-hook="reviewContainer"]`) found nothing and the `/dp/{ASIN}` URL-pattern fallback did not match either. See "How it parses" in the README. |
 | A real page in a different language, prices like `125 €` | Fine — that parses. If rows are still 0, it is not the locale. |
-| A near-empty page | The hub URL. `/shopping/kids/items.aspx` has zero products in its JSON-LD; use a filtered category URL. |
 
 ## A local Selenium session will not start
 
