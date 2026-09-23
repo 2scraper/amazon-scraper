@@ -117,7 +117,7 @@ exit country, and what you
 got. Product counts differ by country and by URL, so a bare "worked for me" is
 not reproducible.
 
-Do not add anything that submits the registration form. This project
+Do not add anything that submits a registration or login form. This project
 deliberately never does, and a captcha token proved valid by creating a real
 account is not a result worth having.
 

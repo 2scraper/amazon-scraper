@@ -12,12 +12,14 @@ body:
 
         Two things answer most reports faster than we can:
 
-        - **Zero products?** Check you used a *filtered* category URL, not the
-          bare `/shopping/kids/items.aspx` hub — the hub carries no product
-          JSON-LD and correctly returns nothing. See
+        - **Zero products?** Open the `{out}_page1_debug.html` dump the run
+          wrote beside itself: a challenge, a sign-in wall or a real page
+          with no results answers most of these. See
           [TROUBLESHOOTING.md](../blob/main/TROUBLESHOOTING.md).
-        - **Wrong currency or localised titles?** Amazon decides both from
-          your exit IP, not from the URL. See "Geo-redirect" in the README.
+        - **Wrong currency?** Amazon converts the price to the currency of
+          your exit IP's country, not the marketplace's — from a European
+          exit amazon.co.uk and amazon.co.jp both quote EUR. See "The
+          currency follows the exit IP, not the domain" in the README.
 
   - type: dropdown
     id: engine
@@ -66,7 +68,7 @@ body:
       placeholder: |
         python3 playwright_scraper.py \
           --url "https://www.amazon.com/s?k=wireless+headphones" \
-          --pages 1 --out girls
+          --pages 1 --out headphones
     validations:
       required: true
 
@@ -86,7 +88,7 @@ body:
     attributes:
       label: What you expected instead
       placeholder: >-
-        96 products, as the README says a category page yields.
+        16–30 organic tiles per search page, as the README's measured results say.
     validations:
       required: true
 
