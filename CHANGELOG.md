@@ -188,6 +188,9 @@ one, and when it does the release notes say so first.
   with "Claude Code native binary not found". The channel is pinned rather
   than a version, so a fixed upstream release needs no edit here.
 
+- `SECURITY.md` said this project has no releases or version tags; it has
+  both. "Supported versions" now names the latest release and `main`.
+
 ## [0.1.3] — 2026-09-11
 
 ### Fixed

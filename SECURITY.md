@@ -79,9 +79,9 @@ Not because these do not matter, but because they belong somewhere else:
 
 ## Supported versions
 
-`main` only. This project has no releases or version tags; fixes land on `main`
-and you update by pulling. If you are running an old clone, update before
-reporting.
+The latest release and `main`. Fixes land on `main` first and ship in the
+next tagged release (see the Releases page). If you are running an old clone,
+update before reporting.
 
 ## If you have leaked a key
 
