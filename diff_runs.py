@@ -8,15 +8,15 @@ the identifier the README already tells people to diff on for price
 monitoring and assortment tracking, but that nothing in this repo actually
 computed.
 
-    python3 diff_runs.py --old girls_clothing.2026-09-01.json \\
-                          --new girls_clothing.2026-09-07.json
+    python3 diff_runs.py --old headphones.2026-09-01.json \\
+                          --new headphones.2026-09-07.json
 
 Typical use is a scheduled re-run of one of the four scraper engines, kept
 under a dated filename, diffed against the previous one:
 
-    python3 playwright_scraper.py --url "$URL" --out "girls_$(date +%F)"
-    python3 diff_runs.py --old "girls_$(ls -t girls_*.json | sed -n 2p)" \\
-                          --new "girls_$(date +%F).json" --out diff.json
+    python3 playwright_scraper.py --url "$URL" --out "headphones_$(date +%F)"
+    python3 diff_runs.py --old "headphones_$(ls -t headphones_*.json | sed -n 2p)" \\
+                          --new "headphones_$(date +%F).json" --out diff.json
 
 Four buckets, each keyed on sku:
 
@@ -26,9 +26,9 @@ Four buckets, each keyed on sku:
   changed        — sku present in both, with a different price,
                    original_price, discount_pct, currency or in_stock
   source_changed — sku present in both with a different price, but also a
-                   different price_source: one run got the DOM-corrected
-                   figure and the other the raw JSON-LD one, so the two are
-                   not comparable on price. Reported separately because this
+                   different price_source: the two runs read the price from
+                   different DOM nodes (offscreen / split / detail), so the
+                   two are not comparable on price. Reported separately because this
                    says something about our own two snapshots, not about the
                    site — and --fail-on-change deliberately ignores it.
 

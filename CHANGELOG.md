@@ -115,6 +115,19 @@ one, and when it does the release notes say so first.
 
 ### Fixed
 
+- **farfetch-scraper leftovers removed from the issue templates, TROUBLESHOOTING,
+  SECURITY and `diff_runs.py`.** The bug-report tips sent a reader to
+  Farfetch's `/shopping/kids/items.aspx` hub "which carries no product
+  JSON-LD", the example wrote `--out girls` and expected "96 products"; the
+  site-change template said the parser "tries JSON-LD first" and asked for a
+  JSON-LD dump; TROUBLESHOOTING's 0-rows table named Farfetch's
+  `-item-<digits>.aspx` links and hub; SECURITY named Akamai; `diff_runs.py`
+  described `source_changed` as "DOM-corrected versus raw JSON-LD" and its
+  examples used `girls_clothing`. Amazon publishes no JSON-LD, so all of
+  these now describe the data-attribute anchors, the `/dp/{ASIN}` fallback,
+  AWS WAF, the `offscreen`/`split`/`detail` price sources and this README's
+  measured 16–30 tiles per search page.
+
 - **The Scraper API's `x-debug` response header is redacted before it is
   logged.** `SECURITY.md` names that header as one of three places
   credentials reach a log unmasked, and the client logged it whole: the API
