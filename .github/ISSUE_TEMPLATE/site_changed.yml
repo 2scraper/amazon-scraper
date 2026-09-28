@@ -9,8 +9,12 @@ body:
         own report because the fix is different from a code bug: something on
         amazon.com moved.
 
-        Useful to know before filing: the parser tries **JSON-LD first**, then a
-        CSS + URL-pattern fallback. Which one broke narrows the fix a lot.
+        Useful to know before filing: Amazon publishes no JSON-LD, so the
+        parser reads the page kind's own data-attribute anchor
+        (`[data-asin]` on search, `[id^="p13n-asin-index-"]` on best
+        sellers, `[data-hook="reviewContainer"]` on reviews) and falls back
+        to the `/dp/{ASIN}` URL pattern, logging a warning when it does.
+        Which one broke narrows the fix a lot.
 
   - type: dropdown
     id: what_broke
@@ -41,9 +45,10 @@ body:
       description: |
         Whichever of these you can get. A capture beats a description.
 
-        - JSON-LD as the page actually serves it:
-          `python3 -c "import json,sys,re;h=open('dump.html').read();print([m[:400] for m in re.findall(r'<script type=\"application/ld\\+json\">(.*?)</script>',h,re.S)][:2])"`
-        - Or open devtools and paste one `Product` node from the `ItemList`.
+        - The exact bytes the parser was given: rerun with
+          `--dump-html dump.html` (it writes on success too) and attach it,
+          with session ids and tokens removed.
+        - Whether the run log warned that the `/dp/` URL-pattern fallback ran.
         - For a field problem: the value you got, and the value on the page.
       render: text
     validations:

@@ -55,7 +55,7 @@ Not because these do not matter, but because they belong somewhere else:
 
 - **Bypassing Amazon's bot protection.** This scraper drives an ordinary
   browser and passes challenges the way a browser does. Anything about how
-  Akamai or reCAPTCHA behave is not a vulnerability in this repository.
+  AWS WAF or Amazon's own captcha behave is not a vulnerability in this repository.
 - **The scraper stopped working.** Amazon changing its markup is expected —
   file it as a normal issue, there is a template for exactly that.
 - **Anything about 2Captcha's services** — the solver API, the Scraping Browser
@@ -79,9 +79,9 @@ Not because these do not matter, but because they belong somewhere else:
 
 ## Supported versions
 
-`main` only. This project has no releases or version tags; fixes land on `main`
-and you update by pulling. If you are running an old clone, update before
-reporting.
+The latest release and `main`. Fixes land on `main` first and ship in the
+next tagged release (see the Releases page). If you are running an old clone,
+update before reporting.
 
 ## If you have leaked a key
 
