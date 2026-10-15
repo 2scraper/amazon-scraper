@@ -10,6 +10,54 @@ one, and when it does the release notes say so first.
 
 ## [Unreleased]
 
+> **Behaviour changes from the 2026-10-14 audit fixes:**
+>
+> * **A URL Amazon answers with "page not found" (HTTP 404) now exits 5 with
+>   `stop_reason: not_found`.** It used to be read as the 503 throttle page
+>   (both carry the same "automated access" comment), retried, rotated and
+>   reported as **blocked, exit 3**.
+> * **CSV cells that begin with `=`, `+`, `-`, `@`, a tab or a line break get a
+>   leading apostrophe** (CSV only; numbers and the JSON are unchanged). The
+>   sidecar's `csv_cells_escaped` says how many.
+> * **At most one paid captcha solve per page**, across all retries and proxy
+>   rotations. With a 3-exit pool one page could buy three.
+> * **Newly rejected flag values:** a negative `--proxy-block-retries` in all
+>   three engines; in `scraper_api_client.py` a negative `--retries` or
+>   `--retry-delay`, and `--timeout` below 1. Each is now exit 2.
+> * Output files are now written atomically and keep the permissions plain
+>   `open()` gave them: new files follow the umask, an existing file keeps its
+>   mode.
+
+### Fixed (2026-10-14 audit)
+
+- **Output writers truncated in place.** `write_json`, `write_csv`,
+  `write_run_meta` and `write_last_attempt` opened their target with `"w"`, so
+  a failure mid-write left a truncated file (a good 703-byte `out.json` became
+  5 bytes of invalid JSON). They now write a temporary file in the same
+  directory, fsync it and rename it over the target; a failed write leaves the
+  previous file byte-identical and no temp file behind.
+- **CSV formula injection.** Third-party text (titles, sellers, bullets, review
+  bodies) reached the CSV as-is. See the blockquote above.
+- **No captcha solve budget.** The solve sat inside the per-exit loop with
+  nothing counting it. `page_flow.SolveBudget` (one per page) is now asked
+  before every purchase in all three engines.
+- **Amazon's 404 read as a throttle.** The Playwright and pyppeteer engines now
+  pass the navigation's HTTP status to the page classifier, which has a
+  `not_found` state; Selenium, which has no status to read, recognises
+  Amazon's own (English) not-found page.
+- **The credential scan skipped everything** when the clone lived under a
+  directory named `venv` or `.git`, because it tested the absolute path. It now
+  tests the path inside the repo, and fails if it scanned no files at all.
+- **A `{...}` placeholder copied from the docs read as configured** in `.env`
+  (`ws://{login}-zone-…`). Any value still containing one now reads as unset,
+  with a warning that names the variable, not the value.
+- README: the flags the engines do not share are listed, instead of a claim
+  that all three take the same flags; the offline suite now checks that list
+  in both directions.
+- Removed references to documents outside this repository from comments and
+  the changelog, and a stale comment about a `--mode variations` that does not
+  exist, plus the unused `UNIQUE_BY_SKU_MODES` constant.
+
 > **Two changes here affect an existing user before anything else does.**
 >
 > **A run that never got its page now exits 5, not 4.** Exit 4 has always
@@ -99,7 +147,7 @@ one, and when it does the release notes say so first.
   sidecar and the most recent attempt both be true. Rewritten on success too,
   so it is never a stale relic of an old failure.
 - **A check that binds every call into a shared module against the callee's
-  real signature** (§17's check #1), which this repo did not have. It catches
+  real signature**, which this repo did not have. It catches
   two things nothing else here can: a call whose arguments do not fit the
   signature, and a call to a name the shared module does not define at all —
   both of which reach a live run as a crash on the first fetch while import,
@@ -126,9 +174,9 @@ one, and when it does the release notes say so first.
   engine logs the status and does not classify on it). It now reads
   `http_code`, falling back to `status` only if that is an integer. After the fix, one live call (`--wait-text results` on the README's search URL) answered HTTP 200, upstream 200, 16 rows, status complete.
 
-- **farfetch-scraper leftovers removed from the issue templates, TROUBLESHOOTING,
-  SECURITY and `diff_runs.py`.** The bug-report tips sent a reader to
-  Farfetch's `/shopping/kids/items.aspx` hub "which carries no product
+- **The issue templates, TROUBLESHOOTING, SECURITY and `diff_runs.py`
+  describe Amazon.** They had been written for another site: the bug-report
+  tips sent a reader to Farfetch's `/shopping/kids/items.aspx` hub "which carries no product
   JSON-LD", the example wrote `--out girls` and expected "96 products"; the
   site-change template said the parser "tries JSON-LD first" and asked for a
   JSON-LD dump; TROUBLESHOOTING's 0-rows table named Farfetch's
@@ -150,18 +198,6 @@ one, and when it does the release notes say so first.
   `parentAsin` also occurs about 11 KB earlier on a detail page, in an
   unrelated object, so reading the first occurrence of each was correct on
   all three measured pages by luck rather than by structure.
-
-### CI
-
-- **A check that binds every call into a shared module against the callee's
-  real signature** (§17's check #1), which this repo did not have. It catches
-  two things nothing else here can: a call whose arguments do not fit the
-  signature, and a call to a name the shared module does not define at all —
-  both of which reach a live run as a crash on the first fetch while import,
-  `--help`, `compileall` and the undefined-name walk all stay green. It skips
-  calls using `*args`/`**kwargs` rather than guessing, treats a locally-bound
-  name as shadowing a same-named module, and asserts it found calls to bind
-  at all so it cannot pass by scanning nothing. Verified by control.
 
 ### CI
 
@@ -208,9 +244,9 @@ one, and when it does the release notes say so first.
 
 - **`fingerprint_client.py` could not read the key from `.env`.** `--key`
   defaulted to `os.environ.get("TWOCAPTCHA_KEY")` and only that, so a key put
-  in `.env` — exactly as §3, the README and `.env.example` instruct — worked
+  in `.env` — exactly as the README and `.env.example` instruct — worked
   for every engine and failed HERE with "No API key". A documented mechanism
-  not applied on one path, which is the shape of half the defects §16 lists.
+  not applied on one path.
 
   It now reads through `env_config.env_value`, calling `load_env()` itself
   because this is a standalone entry point that no engine has necessarily run
@@ -222,7 +258,7 @@ one, and when it does the release notes say so first.
   "still set to the placeholder from .env.example" instead.
 
   Found on a sibling repo's first live `--fingerprint` run, then checked
-  across the family before patching, per §16: five repos had it and one had
+  across the family before patching: five repos had it and one had
   already fixed it. Pinned by a check verified to fail on the old code —
   including that the help string does not interpolate its default, which is
   one substring away from printing a live credential to anyone who types

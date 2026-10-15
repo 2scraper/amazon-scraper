@@ -323,9 +323,43 @@ def proxy_failure(exc) -> str:
     return ""
 
 
+# How many paid captcha solves one page may buy, across EVERY attempt at it:
+# transport retries, throttle reloads and rotations to another exit alike.
+# Before this existed the solve sat inside the per-exit loop with nothing
+# counting it, so a page that kept coming back behind a captcha bought one
+# solve per exit: measured with a stubbed solver, a pool of three exits and
+# the default --proxy-block-retries 2, ONE page cost THREE solves. A fresh
+# exit is a reason to re-fetch, not a fresh allowance.
+SOLVES_PER_PAGE = 1
+
+
+class SolveBudget:
+    """The per-page allowance of paid solves. Create one per page; never
+    reset it on a retry or a rotation.
+
+    `spend()` is called immediately BEFORE a purchase and answers whether the
+    purchase may go ahead, so the check and the count cannot drift apart: a
+    caller that forgot to count would also have forgotten to ask.
+    """
+
+    def __init__(self, limit: int = SOLVES_PER_PAGE):
+        self.limit = limit
+        self.spent = 0
+
+    def spend(self) -> bool:
+        if self.spent >= self.limit:
+            logger.warning("This page has already used its captcha-solve "
+                           "allowance (%d) — not buying another. The run "
+                           "will report what the page holds.", self.limit)
+            return False
+        self.spent += 1
+        return True
+
+
 def numeric_arg_errors(*, pages: int, retries: int, retry_delay: float,
                        delay: float, concurrency: Optional[int] = None,
-                       min_score: Optional[float] = None) -> List[str]:
+                       min_score: Optional[float] = None,
+                       proxy_block_retries: Optional[int] = None) -> List[str]:
     """Every out-of-range numeric argument, as messages. Pure, so it is
     testable without building an argparse parser.
 
@@ -370,6 +404,11 @@ def numeric_arg_errors(*, pages: int, retries: int, retry_delay: float,
         errors.append("--delay cannot be negative")
     if concurrency is not None and concurrency < 1:
         errors.append("--concurrency must be at least 1")
+    # 0 is legal here (it counts RE-tries from another exit), but a negative
+    # value made the per-exit loop run zero times, so the page was never
+    # fetched and the run went on to judge a page it never loaded.
+    if proxy_block_retries is not None and proxy_block_retries < 0:
+        errors.append("--proxy-block-retries cannot be negative")
     if min_score is not None and not 0.0 <= min_score <= 1.0:
         errors.append("--min-score is a reCAPTCHA v3 score and must be "
                       "between 0.0 and 1.0")

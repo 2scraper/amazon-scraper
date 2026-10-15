@@ -236,9 +236,12 @@ jobs:
   # product, three numbers, two hours. A canary pinned to any of them would
   # go red for the catalogue behaving normally.
   #
-  # If it does start being refused from runners, gate its steps on
-  # AMAZON_PROXY the way this file's header describes and let it SKIP with a
-  # ::notice:: when the secret is absent, rather than leaving it red.
+  # If it does start being refused from runners, set the AMAZON_PROXY secret
+  # (see this file's header). Do NOT make it skip green without one: a
+  # canary that skips, is blocked (exit 3), never reaches the site (exit 5)
+  # or parses zero rows must end red, or the badge stops testing the site.
+  # If a proxy becomes required, the job should fail with an ::error::
+  # naming AMAZON_PROXY when the secret is absent.
   variation-canary:
     runs-on: ubuntu-latest
     steps:

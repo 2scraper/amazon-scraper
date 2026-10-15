@@ -388,6 +388,16 @@ def parse_args():
         "AMAZON_CDP_ENDPOINT": "cdp_url",
         "AMAZON_URL": "url",
     })
+    # Here --retries counts EXTRA attempts, so 0 is legal (one attempt). A
+    # negative value is a typo, and a negative --retry-delay made
+    # time.sleep() raise after a billed attempt.
+    if args.retries < 0:
+        p.error("--retries cannot be negative (it counts extra attempts; "
+                "0 means one attempt)")
+    if args.retry_delay < 0:
+        p.error("--retry-delay cannot be negative")
+    if args.timeout < 1:
+        p.error("--timeout must be at least 1 second")
     if not args.url:
         p.error("no --url given, and AMAZON_URL is not set in the environment "
                 "or in .env.")
