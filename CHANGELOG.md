@@ -10,6 +10,8 @@ one, and when it does the release notes say so first.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-10-15
+
 > **Behaviour changes from the 2026-10-14 audit fixes:**
 >
 > * **A URL Amazon answers with "page not found" (HTTP 404) now exits 5 with
@@ -28,7 +30,25 @@ one, and when it does the release notes say so first.
 >   `open()` gave them: new files follow the umask, an existing file keeps its
 >   mode.
 
-### Fixed (2026-10-14 audit)
+> **Two changes here affect an existing user before anything else does.**
+>
+> **A run that never got its page now exits 5, not 4.** Exit 4 has always
+> meant "ran fine, found nothing", and a navigation timeout or a dead proxy
+> returned it too — so a pipeline could not tell an empty search from a
+> transport failure, which want opposite responses. If you branch on exit
+> codes, 5 is now also "we never obtained the page" and not only "the
+> Scraper API errored". A run that gathered rows and THEN timed out is still
+> exit 6, unchanged.
+>
+> **The `variations` column is gone**, replaced by `parent_asin`,
+> `variation_dimensions`, `variation_count` and `selected_variation`. It read
+> the rendered size/colour picker and was null on every row of every run —
+> measured on three live `/dp/` pages on 2026-09-21, where both of its
+> selectors matched zero elements on all three. If you parse `--mode product`
+> output by column name, read the four new ones; if you read it positionally,
+> the row is four columns longer.
+
+### Fixed
 
 - **Output writers truncated in place.** `write_json`, `write_csv`,
   `write_run_meta` and `write_last_attempt` opened their target with `"w"`, so
@@ -57,24 +77,41 @@ one, and when it does the release notes say so first.
 - Removed references to documents outside this repository from comments and
   the changelog, and a stale comment about a `--mode variations` that does not
   exist, plus the unused `UNIQUE_BY_SKU_MODES` constant.
+- **The Scraper API path (`scraper_api_client.py`) failed whenever a wait flag
+  was given, and never saw the target's status.** Measured 2026-09-23 against
+  the live `/tasks/sync` endpoint: `waitFor` sent as a JSON-encoded string
+  (what this client sent) is answered HTTP 422 "params.waitFor must be an
+  object" and is still billed ($0.0005); sent as an object it is answered
+  HTTP 200. It is now an object. And the response's `status` is the API's own
+  verdict ("success"), while the target site's HTTP code is `http_code` — the
+  client logged `status`, so a target 403/503 read "success" in the log (this
+  engine logs the status and does not classify on it). It now reads
+  `http_code`, falling back to `status` only if that is an integer. After the fix, one live call (`--wait-text results` on the README's search URL) answered HTTP 200, upstream 200, 16 rows, status complete.
 
-> **Two changes here affect an existing user before anything else does.**
->
-> **A run that never got its page now exits 5, not 4.** Exit 4 has always
-> meant "ran fine, found nothing", and a navigation timeout or a dead proxy
-> returned it too — so a pipeline could not tell an empty search from a
-> transport failure, which want opposite responses. If you branch on exit
-> codes, 5 is now also "we never obtained the page" and not only "the
-> Scraper API errored". A run that gathered rows and THEN timed out is still
-> exit 6, unchanged.
->
-> **The `variations` column is gone**, replaced by `parent_asin`,
-> `variation_dimensions`, `variation_count` and `selected_variation`. It read
-> the rendered size/colour picker and was null on every row of every run —
-> measured on three live `/dp/` pages on 2026-09-21, where both of its
-> selectors matched zero elements on all three. If you parse `--mode product`
-> output by column name, read the four new ones; if you read it positionally,
-> the row is four columns longer.
+- **The issue templates, TROUBLESHOOTING, SECURITY and `diff_runs.py`
+  describe Amazon.** They had been written for another site: the bug-report
+  tips sent a reader to Farfetch's `/shopping/kids/items.aspx` hub "which carries no product
+  JSON-LD", the example wrote `--out girls` and expected "96 products"; the
+  site-change template said the parser "tries JSON-LD first" and asked for a
+  JSON-LD dump; TROUBLESHOOTING's 0-rows table named Farfetch's
+  `-item-<digits>.aspx` links and hub; SECURITY named Akamai; `diff_runs.py`
+  described `source_changed` as "DOM-corrected versus raw JSON-LD" and its
+  examples used `girls_clothing`. Amazon publishes no JSON-LD, so all of
+  these now describe the data-attribute anchors, the `/dp/{ASIN}` fallback,
+  AWS WAF, the `offscreen`/`split`/`detail` price sources and this README's
+  measured 16–30 tiles per search page.
+
+- **The Scraper API's `x-debug` response header is redacted before it is
+  logged.** `SECURITY.md` names that header as one of three places
+  credentials reach a log unmasked, and the client logged it whole: the API
+  echoes back the task it ran, so a run driven through a credentialed CDP
+  endpoint put that endpoint's username and password into the log. Both
+  patterns are global, because a masker that handles the first occurrence
+  prints the password the other four times and looks like it is working.
+- **`landingAsin` and `parentAsin` are read as an adjacent pair.**
+  `parentAsin` also occurs about 11 KB earlier on a detail page, in an
+  unrelated object, so reading the first occurrence of each was correct on
+  all three measured pages by luck rather than by structure.
 
 ### Changed
 
@@ -160,44 +197,6 @@ one, and when it does the release notes say so first.
   to the untrimmed page before being committed. There was no twister fixture
   at all, which is how the selectors could die unnoticed. Its values are
   pinned, not merely counted.
-
-### Fixed
-
-- **The Scraper API path (`scraper_api_client.py`) failed whenever a wait flag
-  was given, and never saw the target's status.** Measured 2026-09-23 against
-  the live `/tasks/sync` endpoint: `waitFor` sent as a JSON-encoded string
-  (what this client sent) is answered HTTP 422 "params.waitFor must be an
-  object" and is still billed ($0.0005); sent as an object it is answered
-  HTTP 200. It is now an object. And the response's `status` is the API's own
-  verdict ("success"), while the target site's HTTP code is `http_code` — the
-  client logged `status`, so a target 403/503 read "success" in the log (this
-  engine logs the status and does not classify on it). It now reads
-  `http_code`, falling back to `status` only if that is an integer. After the fix, one live call (`--wait-text results` on the README's search URL) answered HTTP 200, upstream 200, 16 rows, status complete.
-
-- **The issue templates, TROUBLESHOOTING, SECURITY and `diff_runs.py`
-  describe Amazon.** They had been written for another site: the bug-report
-  tips sent a reader to Farfetch's `/shopping/kids/items.aspx` hub "which carries no product
-  JSON-LD", the example wrote `--out girls` and expected "96 products"; the
-  site-change template said the parser "tries JSON-LD first" and asked for a
-  JSON-LD dump; TROUBLESHOOTING's 0-rows table named Farfetch's
-  `-item-<digits>.aspx` links and hub; SECURITY named Akamai; `diff_runs.py`
-  described `source_changed` as "DOM-corrected versus raw JSON-LD" and its
-  examples used `girls_clothing`. Amazon publishes no JSON-LD, so all of
-  these now describe the data-attribute anchors, the `/dp/{ASIN}` fallback,
-  AWS WAF, the `offscreen`/`split`/`detail` price sources and this README's
-  measured 16–30 tiles per search page.
-
-- **The Scraper API's `x-debug` response header is redacted before it is
-  logged.** `SECURITY.md` names that header as one of three places
-  credentials reach a log unmasked, and the client logged it whole: the API
-  echoes back the task it ran, so a run driven through a credentialed CDP
-  endpoint put that endpoint's username and password into the log. Both
-  patterns are global, because a masker that handles the first occurrence
-  prints the password the other four times and looks like it is working.
-- **`landingAsin` and `parentAsin` are read as an adjacent pair.**
-  `parentAsin` also occurs about 11 KB earlier on a detail page, in an
-  unrelated object, so reading the first occurrence of each was correct on
-  all three measured pages by luck rather than by structure.
 
 ### CI
 
@@ -398,6 +397,7 @@ scrapers. **Nothing from the previous code is source- or output-compatible.**
   during development was served one; it is exercised only by an offline
   fixture written from Amazon's documented markup.
 
+[0.2.0]: https://github.com/2scraper/amazon-scraper/releases/tag/v0.2.0
 [0.1.3]: https://github.com/2scraper/amazon-scraper/releases/tag/v0.1.3
 [0.1.2]: https://github.com/2scraper/amazon-scraper/releases/tag/v0.1.2
 [0.1.1]: https://github.com/2scraper/amazon-scraper/releases/tag/v0.1.1
