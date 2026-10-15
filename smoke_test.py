@@ -37,6 +37,7 @@ Exits non-zero on any failure.
 import ast
 import contextlib
 import importlib
+import importlib.util
 import io
 import inspect
 import json
@@ -1728,8 +1729,7 @@ BANNED_PHRASES = ("cloud browser", "antidetect browser", "Antidetect Browser",
                   "2parser")
 
 SHIPPED_TEXT_FILES = ("README.md", "TROUBLESHOOTING.md", "CONTRIBUTING.md",
-                      "SECURITY.md", "CHANGELOG.md", ".env.example",
-                      "CLAUDE.md")
+                      "SECURITY.md", "CHANGELOG.md", ".env.example")
 
 
 # Session material and personal data must not come back with the next capture.
@@ -1775,10 +1775,9 @@ def test_fingerprint_client_reads_env():
     # THE DEFECT THIS PINS, found the first time --fingerprint was run live
     # here and confirmed present in five sibling repos: `--key` defaulted to
     # `os.environ.get("TWOCAPTCHA_KEY")` alone. So a key put in `.env` —
-    # which is exactly what §3, the README and .env.example instruct — worked
+    # which is exactly what the README and .env.example instruct — worked
     # for every engine and failed HERE with "No API key". A documented
-    # mechanism not applied on one path, which is the shape of half the
-    # defects §16 lists.
+    # mechanism not applied on one path.
     src = inspect.getsource(fpc.main)
     ok &= check("it loads .env itself, rather than hoping an engine did",
                 "env_config.load_env()" in src)
@@ -1845,8 +1844,529 @@ def test_wording():
     return ok
 
 
+# ---------------------------------------------------------------------------
+# Output files are replaced atomically, and CSV cells cannot run formulas
+# ---------------------------------------------------------------------------
+def test_atomic_writes_and_csv_formulas():
+    group("output files: atomic replace, file mode, CSV formula guard")
+    ok = True
+    import output_writer as ow
+    tmp = tempfile.mkdtemp()
+
+    # Every writer in output_writer goes through _atomic: none may open a
+    # file for writing itself. Found by behaviour below as well; this half
+    # names the writer that regressed.
+    tree = ast.parse(open(os.path.join(REPO_ROOT, "output_writer.py"),
+                          encoding="utf-8").read())
+    writers, raw_opens = [], []
+    for fn in [n for n in tree.body if isinstance(n, ast.FunctionDef)]:
+        src = ast.dump(fn)
+        if "_atomic" in src:
+            writers.append(fn.name)
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call) and getattr(node.func, "id", None) == "open"
+                    and fn.name != "_atomic"):
+                raw_opens.append(fn.name)
+    ok &= check("write_json, write_csv, write_run_meta and write_last_attempt "
+                "all write through _atomic",
+                {"write_json", "write_csv", "write_run_meta",
+                 "write_last_attempt"} <= set(writers))
+    ok &= check("no writer opens its target directly (found: %s)"
+                % (raw_opens or "none"), not raw_opens)
+
+    # A write that fails part-way leaves the previous good file untouched
+    # and no temp file behind. Before _atomic a 703-byte good file came back
+    # as 5 bytes of invalid JSON.
+    real_dump = json.dump
+
+    def failing_dump(obj, fp, **kw):
+        fp.write('[{"sk')
+        raise OSError("disk full (simulated)")
+
+    for writer, target, call in (
+            ("write_json", os.path.join(tmp, "good.json"),
+             lambda p: ow.write_json([Product(sku="B000000002")], p)),
+            ("write_run_meta", os.path.join(tmp, "good.meta.json"),
+             lambda p: ow.write_run_meta(p[:-len(".meta.json")], {"status": "x"})),
+            ("write_last_attempt", os.path.join(tmp, "good.last_attempt.json"),
+             lambda p: ow.write_last_attempt(p[:-len(".last_attempt.json")],
+                                             {"status": "x"}))):
+        with open(target, "w", encoding="utf-8") as f:
+            f.write('{"previous": "good"}')
+        before = open(target, encoding="utf-8").read()
+        ow.json.dump = failing_dump
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                call(target)
+            raised = False
+        except OSError:
+            raised = True
+        finally:
+            ow.json.dump = real_dump
+        leftovers = [n for n in os.listdir(tmp) if n.endswith(".tmp")]
+        ok &= check("%s: a failed write raises, keeps the previous file "
+                    "byte-identical and leaves no temp file" % writer,
+                    raised and open(target, encoding="utf-8").read() == before
+                    and not leftovers)
+
+    # File mode: what open(path, "w") would give. NamedTemporaryFile alone
+    # would make every output 0600.
+    old_umask = os.umask(0o002)
+    try:
+        fresh = os.path.join(tmp, "fresh.json")
+        ow.write_json([], fresh)
+        mode_new = os.stat(fresh).st_mode & 0o777
+        kept = os.path.join(tmp, "kept.json")
+        with open(kept, "w") as f:
+            f.write("[]")
+        os.chmod(kept, 0o640)
+        ow.write_json([], kept)
+        mode_kept = os.stat(kept).st_mode & 0o777
+    finally:
+        os.umask(old_umask)
+    ok &= check("a new file honours the umask (0664 under 002, got %o)" % mode_new,
+                mode_new == 0o664)
+    ok &= check("an existing file keeps its own mode (0640, got %o)" % mode_kept,
+                mode_kept == 0o640)
+
+    # CSV formula neutralisation: strings only, after list joining, CSV only.
+    rows = [Product(sku="B000000003", title='=HYPERLINK("http://x","y")',
+                    brand="-5", seller="@SUM(A1)", coupon="\tTab",
+                    bullets=["=cmd|' /C calc'!A0", "fine"], price=-5.0,
+                    category="plain")]
+    prefix = os.path.join(tmp, "formula")
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc = finish_run(rows, prefix, "both", False, blocked=False,
+                        stop_reason="completed", pages_requested=1,
+                        pages_completed=1, start_url="u", final_url="u",
+                        mode="product", extra={"csv_cells_escaped": "caller"})
+    import csv as _csv
+    with open(prefix + ".csv", newline="", encoding="utf-8") as f:
+        row = list(_csv.DictReader(f))[0]
+    data = json.load(open(prefix + ".json", encoding="utf-8"))[0]
+    ok &= check("exit 0 for a written run", rc == 0)
+    ok &= check("=, -, @ and TAB leading strings get an apostrophe in CSV",
+                row["title"].startswith("'=") and row["brand"] == "'-5"
+                and row["seller"] == "'@SUM(A1)" and row["coupon"] == "'\tTab")
+    ok &= check("a joined list whose first element is a formula is escaped",
+                row["bullets"].startswith("'=cmd"))
+    ok &= check("numbers stay numbers (price -5.0 is not escaped)",
+                row["price"] == "-5.0")
+    ok &= check("ordinary strings are untouched", row["category"] == "plain")
+    ok &= check("JSON keeps the site's text exactly",
+                data["title"].startswith("=HYPERLINK") and data["brand"] == "-5")
+    meta = json.load(open(prefix + ".meta.json", encoding="utf-8"))
+    ok &= check("the caller's extra wins over the writer's own count",
+                meta.get("csv_cells_escaped") == "caller")
+    with contextlib.redirect_stdout(io.StringIO()):
+        finish_run(rows, prefix, "csv", False, blocked=False,
+                   stop_reason="completed", pages_requested=1,
+                   pages_completed=1, start_url="u", final_url="u", mode="product")
+    meta = json.load(open(prefix + ".meta.json", encoding="utf-8"))
+    ok &= check("the sidecar declares how many CSV cells were escaped (5)",
+                meta.get("csv_cells_escaped") == 5 and meta["status"] == "complete")
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# One paid solve per page, however many exits or retries the page takes
+# ---------------------------------------------------------------------------
+def _solver_calls_are_budgeted(path):
+    """For each engine file: every call to a paid solver sits in a `try:`
+    that is immediately preceded by `if not budget.spend(): return False`,
+    the captcha handler is called with the page's budget, and that budget is
+    created ONCE per page, outside the per-exit loop. Read off disk, so it
+    runs whether or not the engine's driver is installed."""
+    tree = ast.parse(open(path, encoding="utf-8").read())
+    problems = []
+    solver_calls = 0
+    for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
+        for parent in ast.walk(fn):
+            body = getattr(parent, "body", None)
+            if not isinstance(body, list):
+                continue
+            for i, stmt in enumerate(body):
+                if not isinstance(stmt, ast.Try):
+                    continue
+                calls = [c for c in ast.walk(stmt) if isinstance(c, ast.Call)
+                         and getattr(c.func, "id", "") in
+                         ("solve_amazon_captcha", "solve_recaptcha")]
+                if not calls:
+                    continue
+                solver_calls += len(calls)
+                prev = body[i - 1] if i else None
+                guarded = (isinstance(prev, ast.If)
+                           and "budget" in ast.dump(prev.test)
+                           and "spend" in ast.dump(prev.test)
+                           and isinstance(prev.body[0], ast.Return))
+                if not guarded:
+                    problems.append("%s line %d: solver call not behind "
+                                    "budget.spend()" % (fn.name, stmt.lineno))
+    fetch = [n for n in tree.body if isinstance(n, ast.FunctionDef)
+             and n.name == "_fetch_one_page"]
+    if not fetch:
+        problems.append("no _fetch_one_page")
+    else:
+        fn = fetch[0]
+        created = [s for s in fn.body if isinstance(s, ast.Assign)
+                   and "SolveBudget" in ast.dump(s.value)]
+        if not created:
+            problems.append("_fetch_one_page does not create its SolveBudget "
+                            "at function level (once per page)")
+        handler_calls = [c for c in ast.walk(fn) if isinstance(c, ast.Call)
+                         and getattr(c.func, "id", "") == "handle_captcha_if_present"]
+        if not handler_calls or any(
+                not any(getattr(a, "id", "") == "budget" for a in c.args)
+                for c in handler_calls):
+            problems.append("handle_captcha_if_present not called with the "
+                            "page's budget")
+    return solver_calls, problems
+
+
+def test_solve_budget():
+    group("captcha: one paid solve per page, across retries and rotations")
+    ok = True
+    b = page_flow.SolveBudget()
+    ok &= check("the allowance is 1 per page",
+                page_flow.SOLVES_PER_PAGE == 1 and b.limit == 1)
+    with contextlib.redirect_stderr(io.StringIO()):
+        first, second, third = b.spend(), b.spend(), b.spend()
+    ok &= check("the first spend is allowed and later ones are refused",
+                first is True and second is False and third is False
+                and b.spent == 1)
+    for name in ENGINES:
+        calls, problems = _solver_calls_are_budgeted(
+            os.path.join(REPO_ROOT, name + ".py"))
+        ok &= check("%s: every paid solve asks the page's budget first "
+                    "(%d solver calls; %s)" % (name, calls,
+                                               "; ".join(problems) or "clean"),
+                    calls == 2 and not problems)
+    return ok
+
+
+def _drive_playwright_fetch(mod, html, status, pool, solver_calls, tmp):
+    """Run playwright_scraper._fetch_one_page against a fake page. The solver
+    is replaced by a counter, so nothing is ever sent anywhere."""
+    class Resp:
+        def __init__(self, s):
+            self.status = s
+
+    class FakePage:
+        url = "https://www.amazon.com/s?k=x"
+
+        def goto(self, url, **kw):
+            return Resp(status)
+
+        def content(self):
+            return html
+
+        def query_selector_all(self, sel):
+            return []
+
+        def wait_for_timeout(self, ms):
+            pass
+
+        def evaluate(self, *a):
+            return None
+
+        def screenshot(self, **kw):
+            pass
+
+        def reload(self, **kw):
+            pass
+
+    class FakeSession:
+        def __init__(self):
+            self.page = FakePage()
+
+        def relaunch(self):
+            self.page = FakePage()
+
+    def fake_solver(*a, **kw):
+        solver_calls.append(1)
+        return "abcdef"
+
+    saved = {k: getattr(mod, k) for k in
+             ("solve_amazon_captcha", "amazon_captcha_submit_url",
+              "_wait_out_waf_challenge")}
+    mod.solve_amazon_captcha = fake_solver
+    mod.amazon_captcha_submit_url = lambda ch, sol: "https://www.amazon.com/s?k=x"
+    mod._wait_out_waf_challenge = lambda page, args: True
+    args = types.SimpleNamespace(
+        pages=1, retries=1, retry_delay=0, proxy_block_retries=2,
+        solve_captcha="always", twocaptcha_key="stub-never-sent",
+        captcha_api="v2", min_score=0.3, mode="listing", dump_html=None,
+        out=os.path.join(tmp, "probe"), category=None)
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            return mod._fetch_one_page(FakeSession(), args, pool, 1,
+                                       "https://www.amazon.com/s?k=x")
+    finally:
+        for k, v in saved.items():
+            setattr(mod, k, v)
+
+
+def test_engine_fetch_behaviour(skips):
+    group("engine behaviour with the driver faked (Playwright)")
+    ok = True
+    try:
+        mod = importlib.import_module("playwright_scraper")
+    except ImportError as e:
+        # Reported by test_engines already; the static halves of these checks
+        # (test_solve_budget, test_not_found_page) run regardless.
+        print("  SKIP  behavioural fetch checks: %s" % e)
+        return ok
+    tmp = tempfile.mkdtemp()
+    pool = ProxyPool(["http://a:1", "http://b:2", "http://c:3"], rotate="per-run")
+    calls = []
+    out = _drive_playwright_fetch(mod, CAPTCHA_PAGE, 200, pool, calls, tmp)
+    ok &= check("a page that stays behind a captcha across 3 exits buys ONE "
+                "solve, not 3 (bought %d)" % len(calls), len(calls) == 1)
+    ok &= check("...and is reported as blocked",
+                out.blocked_by == "amazon-captcha")
+    calls = []
+    out = _drive_playwright_fetch(mod, NOT_FOUND_PAGE, 404, pool, calls, tmp)
+    ok &= check("a 404 is not_found: not blocked, no solve, not retried",
+                out.not_found and out.blocked_by is None and not calls
+                and not out.ok)
+    calls = []
+    out = _drive_playwright_fetch(mod, NOT_FOUND_PAGE, None, None, calls, tmp)
+    ok &= check("with no pool at all the same page is still not_found",
+                out.not_found and out.blocked_by is None)
+    return ok
+
+
+# Amazon's own 404 answer for /dp/B0DEADDEAD on amazon.com, 2026-10-14
+# (HTTP 404, 2,319 bytes), trimmed of its inline CSS. It carries the same
+# "automated access" comment as the 503 throttle page, which is why it used
+# to be read as throttled and reported as blocked.
+NOT_FOUND_PAGE = """<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>
+      Page Not Found
+    </title>
+  </head>
+  <body>
+    <!--
+    To discuss automated access to Amazon data please contact api-services-support@amazon.com.
+    -->
+  <a href="/">
+    <img id="b" src="https://images-na.ssl-images-amazon.com/images/G/01/error/logo._TTD_.png" alt="Amazon"/>
+  </a>
+    <div id="g">
+      <div>
+        <a href="/">
+          <img src="https://images-na.ssl-images-amazon.com/images/G/01/error/en_US/title._TTD_.png"
+               alt="Sorry! We couldn't find that page. Try searching or go to Amazon's home page."/>
+        </a>
+      </div>
+      <a href="/dogsofamazon" target="_blank" rel="noopener noreferrer">
+        <img id="d" alt="Dogs of Amazon">
+      </a>
+    </div>
+  </body>
+</html>
+<!-- 806ac919 --><!-- sp:error_pages -->"""
+
+
+def test_not_found_page():
+    group("a page that does not exist is not a block")
+    ok = True
+    ok &= check("Amazon's 404 page is not_found, not throttled",
+                detect_page_state(NOT_FOUND_PAGE) == "not_found")
+    ok &= check("...and is not reported as a block (it used to be exit 3)",
+                detect_bot_challenge(NOT_FOUND_PAGE) is None)
+    ok &= check("an HTTP 404 or 410 is not_found whatever the body says",
+                detect_page_state("<html>x</html>", status=404) == "not_found"
+                and detect_page_state("<html>x</html>", status=410) == "not_found")
+    ok &= check("the 503 throttle page is still throttled",
+                detect_page_state(FIX_THROTTLE_PAGE_DE) == "throttled"
+                and detect_page_state(FIX_THROTTLE_PAGE_DE, status=503) == "throttled")
+    ok &= check("a review merely SAYING the phrase is not a 404 page",
+                detect_page_state("<p>I couldn't find that page in the manual"
+                                  "</p>") == "ok")
+    # Every engine hands the status it has to the classifier, and has a
+    # not_found outcome with its own stop_reason. Read off disk.
+    for name in ENGINES:
+        src = open(os.path.join(REPO_ROOT, name + ".py"), encoding="utf-8").read()
+        tree = ast.parse(src)
+        fetch = [n for n in tree.body if isinstance(n, ast.FunctionDef)
+                 and n.name == "_fetch_one_page"][0]
+        classify = [c for c in ast.walk(fetch) if isinstance(c, ast.Call)
+                    and getattr(c.func, "id", "") == "detect_page_state"]
+        ok &= check("%s passes a status to every detect_page_state call (%d)"
+                    % (name, len(classify)),
+                    classify and all(any(k.arg == "status" for k in c.keywords)
+                                     for c in classify))
+        ok &= check("%s records not_found and reports it as its own stop_reason"
+                    % name, "outcome.not_found = True" in src
+                    and src.count('"not_found" if ') >= 2)
+    ok &= check("a zero-row run that stopped on not_found exits 5, not 3 or 4",
+                _exit_for([], "not_found") == EXIT_FETCH_FAILED)
+    return ok
+
+
+def _exit_for(rows, stop_reason):
+    prefix = os.path.join(tempfile.mkdtemp(), "x")
+    with contextlib.redirect_stdout(io.StringIO()):
+        return finish_run(rows, prefix, "json", False, blocked=False,
+                          stop_reason=stop_reason, pages_requested=1,
+                          pages_completed=0, start_url="u", final_url="u")
+
+
+# ---------------------------------------------------------------------------
+# Small configuration and CLI guards
+# ---------------------------------------------------------------------------
+def test_config_and_cli_guards():
+    group("placeholders, negative flags and the credential scan's paths")
+    ok = True
+    saved = {k: os.environ.get(k) for k in ("AMAZON_PROXY", "AMAZON_CDP_ENDPOINT")}
+    try:
+        os.environ["AMAZON_PROXY"] = "http://{user}:{password}@xx.proxy.example:2334"
+        os.environ["AMAZON_CDP_ENDPOINT"] = ("ws://{login}-zone-scraping_browser-"
+                                             "country-xx-pid-{profileId}:{password}"
+                                             "@cb.example:9222")
+        with contextlib.redirect_stderr(io.StringIO()):
+            proxy = env_config.env_value("AMAZON_PROXY")
+            cdp = env_config.env_value("AMAZON_CDP_ENDPOINT")
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    ok &= check("a value still holding a {...} placeholder reads as unset",
+                proxy is None and cdp is None)
+
+    errors = page_flow.numeric_arg_errors(pages=1, retries=1, retry_delay=0,
+                                          delay=0, proxy_block_retries=-1)
+    ok &= check("--proxy-block-retries -1 is refused and named",
+                len(errors) == 1 and "--proxy-block-retries" in errors[0])
+    ok &= check("--proxy-block-retries 0 is legal (it counts RE-tries)",
+                page_flow.numeric_arg_errors(pages=1, retries=1, retry_delay=0,
+                                             delay=0, proxy_block_retries=0) == [])
+    for name in ENGINES:
+        src = open(os.path.join(REPO_ROOT, name + ".py"), encoding="utf-8").read()
+        ok &= check("%s validates --proxy-block-retries" % name,
+                    "proxy_block_retries=args.proxy_block_retries" in src)
+    for flag, value in (("--retries", "-1"), ("--retry-delay", "-1"),
+                        ("--timeout", "0")):
+        proc = subprocess.run([sys.executable, "scraper_api_client.py", "--url",
+                               "https://www.amazon.com/s?k=x", flag, value],
+                              cwd=REPO_ROOT, capture_output=True, text=True,
+                              env=dict(os.environ, TWOCAPTCHA_KEY=""))
+        err = [l for l in proc.stderr.splitlines() if "error:" in l]
+        ok &= check("scraper_api_client %s %s is a usage error naming the flag"
+                    % (flag, value),
+                    proc.returncode == 2 and err and flag in err[0])
+
+    # The credential scan judges exclusions on the path INSIDE the repo. A
+    # clone living under a directory called `venv` used to scan 0 files and
+    # report clean. Skipped only when the whole .github directory is absent
+    # (an image built without CI material), never when one file is.
+    gh = os.path.join(REPO_ROOT, ".github")
+    if not os.path.isdir(gh):
+        print("  SKIP  credential-scan path checks: no .github in this tree")
+        return ok
+    spec = importlib.util.spec_from_file_location(
+        "ci_checks_probe", os.path.join(gh, "ci_checks.py"))
+    cc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cc)
+    from pathlib import Path
+    base = Path(tempfile.mkdtemp()) / "venv" / "clone"
+    (base / "sub").mkdir(parents=True)
+    (base / "notes.txt").write_text("nothing here\n")
+    (base / "sub" / "x.py").write_text("x = 1\n")
+    env = base / "myenv"
+    (env / "lib").mkdir(parents=True)
+    (env / "pyvenv.cfg").write_text("home = /usr\n")
+    (env / "lib" / "vendored.py").write_text("y = 2\n")
+    cc.REPO = base
+    cc._VENV_CACHE.clear()
+    names = sorted(p.relative_to(base).as_posix() for p in cc.scanned_files())
+    ok &= check("a clone under an ancestor named venv still scans its files "
+                "(%s)" % names, names == ["notes.txt", "sub/x.py"])
+    return ok
+
+
+# The flags the engines do NOT share, as the README documents them. Checked
+# in both directions: a new unshared flag fails, and so does closing one of
+# these differences without updating the README.
+ENGINE_ONLY_FLAGS = {
+    "playwright_scraper": {"--fingerprint", "--fp-country", "--fp-tags",
+                           "--locale"},
+    "puppeteer_scraper": {"--chromium-path"},
+    "selenium_scraper": {"--fingerprint", "--fp-country", "--fp-tags",
+                         "--no-sandbox", "--disable-dev-shm-usage"},
+}
+
+
+def test_engine_flag_parity():
+    group("engine flags: shared set plus the documented differences")
+    ok = True
+    flags = {}
+    for name in ENGINES:
+        src = open(os.path.join(REPO_ROOT, name + ".py"), encoding="utf-8").read()
+        flags[name] = set(re.findall(r'add_argument\(\s*"(--[a-z0-9-]+)"', src))
+    shared = set.intersection(*flags.values())
+    for name in ENGINES:
+        own = flags[name] - shared
+        ok &= check("%s: flags beyond the shared set are exactly the documented "
+                    "ones (%s)" % (name, ", ".join(sorted(own)) or "none"),
+                    own == ENGINE_ONLY_FLAGS[name])
+    ok &= check("...and the shared set is not empty (%d flags)" % len(shared),
+                len(shared) > 20)
+    readme = open(os.path.join(REPO_ROOT, "README.md"), encoding="utf-8").read()
+    ok &= check("README lists every engine-only flag",
+                all(f in readme for v in ENGINE_ONLY_FLAGS.values() for f in v))
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# No private references in shipped files
+# ---------------------------------------------------------------------------
+# The tokens are assembled from pieces so this file does not match itself.
+_SECTION_SIGN = chr(0xA7)
+_PRIVATE_TOKENS = ("CLAUDE" + ".md", "claude" + "_2scraper",
+                   "2scraper" + "_repo_rules", "play" + "book " + _SECTION_SIGN,
+                   "template " + _SECTION_SIGN)
+_SECTION_REF = re.compile(_SECTION_SIGN + r"\s*\d")
+
+
+def test_no_private_references():
+    group("shipped files cite nothing a reader cannot open")
+    ok = True
+    scanned = 0
+    hits = []
+    for root, dirs, files in os.walk(REPO_ROOT):
+        dirs[:] = [d for d in dirs if d not in (".git", "__pycache__")
+                   and not os.path.isfile(os.path.join(root, d, "pyvenv.cfg"))]
+        for name in files:
+            if not (name.endswith((".py", ".md", ".yml", ".yaml", ".txt",
+                                   ".toml", ".example", ".cfg"))
+                    or name in (".gitignore", ".dockerignore", "Dockerfile")):
+                continue
+            path = os.path.join(root, name)
+            rel = os.path.relpath(path, REPO_ROOT)
+            if rel == "CLAUDE" + ".md":
+                continue  # a local-only file, never committed
+            text = open(path, encoding="utf-8", errors="replace").read()
+            scanned += 1
+            for token in _PRIVATE_TOKENS:
+                if token in text:
+                    hits.append("%s: %s" % (rel, token))
+            if _SECTION_REF.search(text):
+                hits.append("%s: section sign followed by a number" % rel)
+    ok &= check("no shipped file cites a private document (%s)"
+                % ("; ".join(hits) or "none"), not hits)
+    ok &= check("...and the scan read files (%d)" % scanned, scanned > 20)
+    return ok
+
+
 def test_shared_calls_bind_against_the_real_signature():
-    """§17's check #1: bind every call into a shared module against the
+    """Bind every call into a shared module against the
     callee's real signature.
 
     This exists because of a defect that no other check in this suite can
@@ -2218,6 +2738,13 @@ def main() -> int:
     ok &= test_workflow_inline_python_compiles()
     ok &= test_fingerprint_client_reads_env()
     ok &= test_wording()
+    ok &= test_atomic_writes_and_csv_formulas()
+    ok &= test_solve_budget()
+    ok &= test_not_found_page()
+    ok &= test_engine_fetch_behaviour(skips)
+    ok &= test_config_and_cli_guards()
+    ok &= test_engine_flag_parity()
+    ok &= test_no_private_references()
     ok &= test_shared_calls_bind_against_the_real_signature()
     ok &= test_sample_output()
 

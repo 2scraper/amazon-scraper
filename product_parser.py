@@ -378,6 +378,22 @@ CAPTCHA_MARKERS = ("/errors/validateCaptcha", "Enter the characters you see belo
 # got it wrong in both directions at once, so the state is read from the URL.
 SIGNIN_URL_MARKER = "/ap/signin"
 
+# Amazon's "page not found" answer: HTTP 404 with a 2 KB page ("Sorry! We
+# couldn't find that page", a Dogs of Amazon picture). Measured on
+# amazon.com on 2026-10-14 for /dp/B0DEADDEAD. It carries the same
+# "To discuss automated access to Amazon data" comment as the 503 throttle
+# page, so without a state of its own it read as THROTTLED: retried, rotated,
+# and finally reported as a block (exit 3) for a URL that simply does not
+# exist. The status is the primary signal; this text is the fallback for an
+# engine that cannot read a status (Selenium). Only the English wording was
+# measured, so on another marketplace's language a statusless engine can
+# still miss it.
+NOT_FOUND_STATUSES = (404, 410)
+# Anchored on the image's alt ATTRIBUTE, not the bare sentence, so a review
+# that happens to say "couldn't find that page" cannot match.
+NOT_FOUND_MARKERS = ('alt="Sorry! We couldn\'t find that page',
+                     'alt="Sorry! We couldn&#39;t find that page')
+
 # Kept under the family's name and shape so the engines' shared logic reads
 # the same in every repo. Only the states that genuinely stood between the
 # run and the content are listed: the WAF interstitial is NOT here, because
@@ -390,7 +406,8 @@ BOT_CHALLENGE_MARKERS = {
 
 def detect_page_state(html: str, status: Optional[int] = None,
                       url: Optional[str] = None) -> str:
-    """One of "ok", "waf_challenge", "captcha", "throttled", "signin".
+    """One of "ok", "waf_challenge", "captcha", "not_found", "throttled",
+    "signin".
 
     Order matters. A captcha page also mentions "Sorry", and a signin page
     can be reached from either, so the most specific and most consequential
@@ -402,6 +419,9 @@ def detect_page_state(html: str, status: Optional[int] = None,
         return "captcha"
     if any(m in html for m in WAF_CHALLENGE_MARKERS):
         return "waf_challenge"
+    # Before the throttle check: the 404 page carries a throttle marker too.
+    if status in NOT_FOUND_STATUSES or any(m in html for m in NOT_FOUND_MARKERS):
+        return "not_found"
     if any(m in html for m in THROTTLE_MARKERS) or status == 503:
         return "throttled"
     # From the URL the browser ENDED on — see SIGNIN_URL_MARKER.
@@ -1206,8 +1226,7 @@ def _first_parsing_price(soup, selectors, mcur):
 #
 # On those same three pages the map held 1, 776 and 9 ASINs and
 # num_total_variations said 1, 776 and 9 — so the site states the answer we
-# can check ourselves against, which beats any threshold (§21's totalPages
-# trick on a different field).
+# can check ourselves against, which beats any threshold.
 #
 # The values in each ASIN's list are positional against `dimensions`, which
 # is why the two are read together and neither is used alone.

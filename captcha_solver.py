@@ -119,9 +119,8 @@ def detect_recaptcha_v3(html: str, page_url: str) -> Optional[CaptchaChallenge]:
        attributes (data-captcha-type="recaptcha" data-version="v3"
        data-sitekey="..." data-action="..."), with the actual execute()
        call happening inside a bundled JS file, never appearing as
-       readable inline script text at all — confirmed live on the sibling
-       farfetch-scraper repo's target,
-       sign-up modal via DevTools inspection. A previous version of this
+       readable inline script text at all — confirmed live on another
+       site's sign-up modal via DevTools inspection. A previous version of this
        function, which only checked for format 1, reported "no captcha"
        on this exact page despite one being genuinely present — caught by
        manually inspecting the DOM, not by the detector itself, which is
@@ -170,7 +169,7 @@ def detect_recaptcha_v3(html: str, page_url: str) -> Optional[CaptchaChallenge]:
 
 # ---------------------------------------------------------------------------
 # Runtime detection (added 2026-08-24 — the static-HTML detector below no
-# longer matched the sibling farfetch-scraper repo's target)
+# longer matched the site it was first written for)
 # ---------------------------------------------------------------------------
 #
 # What changed there: the sign-up modal used to render

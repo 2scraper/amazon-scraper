@@ -138,6 +138,18 @@ See [`sample_output.json`](sample_output.json) and
 [`sample_output.csv`](sample_output.csv) — both cut from a real run, not
 written by hand. CI checks their columns against the schema.
 
+**In the CSV only, a text cell that begins with `=`, `+`, `-`, `@`, a tab or
+a line break gets a leading apostrophe**, so a spreadsheet shows it as text
+instead of running it as a formula. Titles, sellers, bullets and review text
+are written by third parties. Numbers are never touched and the JSON keeps
+the original text; `csv_cells_escaped` in `<out>.meta.json` says how many
+cells were changed.
+
+Output files are replaced atomically (written to a temporary file beside the
+target, then renamed), so a run killed mid-write leaves the previous file
+intact rather than a truncated one. File permissions follow your umask, and
+an existing file keeps its mode.
+
 ### The run-metadata sidecar
 
 Every successful run writes `<out>.meta.json` beside its output:
@@ -225,7 +237,7 @@ way, which is why it is what gets read.
 | 2 | Bad usage (including a credentialed `--cdp-endpoint` given to Selenium) |
 | 3 | Blocked before parsing: Amazon's image captcha, an unresolved throttle, or a sign-in wall |
 | 4 | Ran fine, found nothing |
-| 5 | The page was never fetched: a navigation timeout, a dead or unauthenticated proxy, or a Scraper API error. **Not** an empty result — nothing can be concluded about the catalogue |
+| 5 | The page was never fetched: a navigation timeout, a dead or unauthenticated proxy, a Scraper API error, or a URL Amazon says does not exist (HTTP 404, `stop_reason: not_found`). **Not** an empty result — nothing can be concluded about the catalogue |
 | 6 | Partial: some pages gathered, then the run stopped early |
 
 Exit 3 covers the sign-in wall as well as a captcha, because the family's
@@ -434,7 +446,17 @@ faster way to get that address scored than to gather data).
 All three engines share the page-state policy (`page_flow.py`) and the
 status/exit-code mapping (`output_writer.finish_run`), so they cannot drift
 apart on what a page means or what a run reports. The offline suite asserts
-they take the same flags.
+that each engine takes the family's core flags; the flag sets are not
+identical:
+
+* `--fingerprint`, `--fp-country` and `--fp-tags` exist in Playwright and
+  Selenium, not in pyppeteer; `--locale` is Playwright-only.
+* pyppeteer adds `--chromium-path`; Selenium adds `--no-sandbox` and
+  `--disable-dev-shm-usage`.
+* `--concurrency` is accepted and ignored by Selenium and pyppeteer (above).
+
+Paid captcha solves are capped at **one per page** in every engine, however
+many retries or proxy rotations that page takes.
 
 Limits worth knowing before you pick one:
 

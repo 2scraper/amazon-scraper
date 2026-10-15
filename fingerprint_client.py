@@ -331,7 +331,7 @@ def main() -> int:
     # loader. It used to read `os.environ` alone, which meant a key put in
     # `.env` exactly as the README and .env.example instruct worked for every
     # engine and failed HERE with "No API key" — a documented mechanism not
-    # applied on one path, which is the shape of half the defects §16 lists.
+    # applied on one path.
     #
     # `.env` has to be LOADED before it can be read: `env_value` looks at
     # os.environ, and `load_env` is what fills that from the file. Calling it

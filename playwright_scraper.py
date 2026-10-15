@@ -119,10 +119,14 @@ class PageOutcome:
     # Set when Amazon answered with a signin redirect. Neither a block nor a
     # failure: the run asked for something an anonymous visitor cannot have.
     needs_signin: bool = False
+    # Set when Amazon answered "this page does not exist" (HTTP 404/410 or its
+    # own not-found page). Not a block: no exit, proxy or solve changes it.
+    not_found: bool = False
 
     @property
     def ok(self) -> bool:
-        return not self.load_failed and self.blocked_by is None and not self.needs_signin
+        return (not self.load_failed and self.blocked_by is None
+                and not self.needs_signin and not self.not_found)
 
 
 ITEM_LINK_SELECTOR = SELECTORS["item_link"]
@@ -485,8 +489,12 @@ def _content_when_settled(page, attempts: int = 4, pause_ms: int = 700):
     return None
 
 
-def handle_captcha_if_present(page, args) -> bool:
+def handle_captcha_if_present(page, args, budget) -> bool:
     """Detect and solve a challenge. True if something was solved.
+
+    `budget` is the page's page_flow.SolveBudget: every purchase below asks
+    it first, so retries and rotations cannot buy a second solve for the
+    same page.
 
     Runs after EVERY navigation, for ANY page — not scoped to one URL. Two
     families are checked, because Amazon serves one on the paths this scraper
@@ -530,6 +538,8 @@ def handle_captcha_if_present(page, args) -> bool:
                            "solved — continuing with whatever the page holds. "
                            "Pass --twocaptcha-key or set TWOCAPTCHA_KEY if the "
                            "run comes back blocked (exit 3).")
+            return False
+        if not budget.spend():
             return False
         try:
             # Fetched through the BROWSER's request context, not this
@@ -579,6 +589,8 @@ def handle_captcha_if_present(page, args) -> bool:
         logger.warning("No 2captcha API key, so this challenge cannot be "
                        "solved — continuing with whatever the page already "
                        "holds.")
+        return False
+    if not budget.spend():
         return False
     try:
         token = solve_recaptcha(challenge, args.twocaptcha_key,
@@ -631,7 +643,13 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
     # Zero without a pool: there is nowhere else to go, and a bare retry from
     # the same address just burns it further.
     block_retries = args.proxy_block_retries if (pool and len(pool) > 1) else 0
+    # One allowance for the whole page, across every exit and retry.
+    budget = page_flow.SolveBudget()
     html, state, load_failed = None, "ok", False
+    # The HTTP status of the navigation that produced the current
+    # document, or None when the driver cannot say (Selenium) or the
+    # document has since been replaced (a captcha solve navigates).
+    status = None
 
     for block_attempt in range(block_retries + 1):
         logger.info("Fetching page %d/%d: %s", page_num, args.pages, url)
@@ -640,7 +658,9 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
         load_failed, exit_failed = False, None
         for attempt in range(1, args.retries + 1):
             try:
-                session.page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                response = session.page.goto(url, wait_until="domcontentloaded",
+                                             timeout=60000)
+                status = response.status if response else None
                 load_failed = False
                 break
             except (PWTimeout, PWError) as e:
@@ -676,13 +696,14 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
         # check would be looking at a challenge page rather than at Amazon.
         _wait_out_waf_challenge(session.page, args)
 
-        if handle_captcha_if_present(session.page, args):
+        if handle_captcha_if_present(session.page, args, budget):
             # A solve navigated the page. Give the destination a moment
             # before judging what came back.
             session.page.wait_for_timeout(1000)
+            status = None  # the solve replaced the document
 
         html = _content_when_settled(session.page) or ""
-        state = detect_page_state(html, url=session.page.url)
+        state = detect_page_state(html, status=status, url=session.page.url)
 
         # A 503 throttle is not a block and not a load failure: Amazon
         # answered, it just declined to serve content this second. A fresh
@@ -697,16 +718,18 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
                                "(%d/%d).", pause, attempt, args.retries)
                 time.sleep(pause)
                 try:
-                    session.page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    response = session.page.goto(url, wait_until="domcontentloaded",
+                                                 timeout=60000)
+                    status = response.status if response else None
                 except (PWTimeout, PWError):
                     continue
                 _wait_out_waf_challenge(session.page, args)
                 html = _content_when_settled(session.page) or ""
-                state = detect_page_state(html, url=session.page.url)
+                state = detect_page_state(html, status=status, url=session.page.url)
                 if state != "throttled":
                     break
 
-        if state in ("ok", "signin"):
+        if state in ("ok", "signin", "not_found"):
             break
 
         # Still throttled or still behind a captcha. A different exit is the
@@ -722,6 +745,18 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
     if load_failed:
         logger.error("Gave up loading %s after %d attempt(s).", url, args.retries)
         outcome.load_failed = True
+        return outcome
+
+    if state == "not_found":
+        # The URL names a page Amazon does not have — a delisted or mistyped
+        # ASIN, a dead category. Not retried and not rotated: a different
+        # exit gets the same answer. Before this state existed, Amazon's 404
+        # page was read as its 503 throttle page (both carry the same
+        # "automated access" comment), retried, and reported as blocked —
+        # exit 3, sending the reader after a proxy for a wrong URL.
+        logger.error("Amazon says this page does not exist (%s). Check the "
+                     "URL; no proxy or captcha solve changes this.", url)
+        outcome.not_found = True
         return outcome
 
     if state == "signin":
@@ -1051,6 +1086,7 @@ def scrape(args) -> int:
             if not first.ok:
                 stop_reason = ("page_load_timeout" if first.load_failed
                                else "needs_signin" if first.needs_signin
+                               else "not_found" if first.not_found
                                else f"blocked_{first.blocked_by}")
                 # A signin wall is not a bot challenge, but it has the same
                 # consequence: something stands between the run and the
@@ -1091,6 +1127,7 @@ def scrape(args) -> int:
                         worst = min(failed, key=lambda o: o.page_num)
                         stop_reason = ("page_load_timeout" if worst.load_failed
                                        else "needs_signin" if worst.needs_signin
+                                       else "not_found" if worst.not_found
                                        else f"blocked_{worst.blocked_by}")
                         blocked = any(o.blocked_by or o.needs_signin for o in rest)
                     elif exhausted:
@@ -1116,6 +1153,7 @@ def scrape(args) -> int:
                         if not outcome.ok:
                             stop_reason = ("page_load_timeout" if outcome.load_failed
                                            else "needs_signin" if outcome.needs_signin
+                                           else "not_found" if outcome.not_found
                                            else f"blocked_{outcome.blocked_by}")
                             blocked = (outcome.blocked_by is not None
                                        or outcome.needs_signin)
@@ -1333,7 +1371,8 @@ def parse_args():
     for message in page_flow.numeric_arg_errors(
             pages=args.pages, retries=args.retries,
             retry_delay=args.retry_delay, delay=args.delay,
-            concurrency=args.concurrency, min_score=args.min_score):
+            concurrency=args.concurrency, min_score=args.min_score,
+            proxy_block_retries=args.proxy_block_retries):
         p.error(message)
     if not args.url:
         p.error("no --url given, and AMAZON_URL is not set in the environment "

@@ -28,6 +28,7 @@ scripts behave exactly as before.
 
 import logging
 import os
+import re
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,15 @@ _PLACEHOLDERS = {
     "changeme",
     "",
 }
+
+# A `{...}` left anywhere in a value is a placeholder too. The two
+# credentialled URLs are documented the way the vendor documents them —
+# `ws://{login}-zone-...:{password}@cb.2captcha.com:9222` and
+# `http://{user}:{password}@...` — and neither literal is in the set above,
+# so a value copied from the docs read as CONFIGURED and reached the
+# endpoint with `{login}` as its username, coming back as a 401 a long way
+# from its cause. Real credentials and URLs never contain braces.
+_BRACED_PLACEHOLDER = re.compile(r"\{[^{}\s]*\}")
 
 _loaded_from = None
 
@@ -158,6 +168,14 @@ def env_value(name):
         logger.warning(
             "%s is still set to the placeholder from .env.example — treating it "
             "as unset. Put your real value in .env.", name)
+        return None
+    if _BRACED_PLACEHOLDER.search(stripped):
+        # Name the variable, never quote the value: it may be a URL with a
+        # real password beside the placeholder.
+        logger.warning(
+            "%s still contains a {...} placeholder from the documentation — "
+            "treating it as unset. Replace every {...} with your real value.",
+            name)
         return None
     return stripped
 
