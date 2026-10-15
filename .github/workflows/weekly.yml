@@ -35,8 +35,9 @@ name: weekly
 # needs the workflow on the DEFAULT branch, or it answers a 404 that reads
 # like a filename typo), then read what actually happened per job. Add the
 # schedule below for the jobs that pass, and for any that are refused from
-# runners either gate them on the AMAZON_PROXY secret with a ::notice:: skip
-# — the pattern canary.yml's header describes — or drop them and say why.
+# runners either require the AMAZON_PROXY secret (failing with an ::error::
+# that names it when it is absent, never a green skip) or drop them and say
+# why.
 #
 #   schedule:
 #     - cron: "41 5 * * 1"    # Mondays, off the hour
