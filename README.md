@@ -529,7 +529,7 @@ before they are committed. Two exceptions, both stated in the file itself:
   a real account id ever arrives with a future capture.
 
 Two workflows: `tests.yml` is offline only and never touches amazon.com or a
-credential; `canary.yml` runs one real 3-page listing daily and asserts
+credential; `canary.yml` runs one real 3-page listing weekly (Mondays) and asserts
 `pages_completed`, `status == "complete"`, a product floor and a price-coverage
 floor. Three pages, not one, because with one page pagination is never
 exercised at all. Its first manual run, from a GitHub runner with no proxy at

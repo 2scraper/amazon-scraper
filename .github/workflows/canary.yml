@@ -34,12 +34,8 @@ name: canary
 # and there is no commented-out line for someone to forget to uncomment.
 on:
   schedule:
-    # Once a day, off the hour, so it is not competing with everyone else's
+    # Once a week (Mondays), off the hour, so it is not competing with everyone else's
     # on-the-hour cron jobs for runner availability.
-    - cron: "23 6 * * *"
-    # Mondays: the same jobs, WITH the paid secrets (proxy, Scraping Browser,
-    # captcha key). On the daily run above those secrets read as empty, so
-    # it takes the free no-secret route and bills nothing.
     - cron: "23 6 * * 1"
   workflow_dispatch:
 
@@ -88,7 +84,7 @@ jobs:
           # Empty when the secret is not set, which env_config.py treats as
           # unset — so this line is correct in both cases and needs no edit
           # when the secret arrives. See the header.
-          AMAZON_PROXY: ${{ (github.event_name != 'schedule' || github.event.schedule == '23 6 * * 1') && secrets.AMAZON_PROXY || '' }}
+          AMAZON_PROXY: ${{ secrets.AMAZON_PROXY }}
         run: |
           set +e
           python3 playwright_scraper.py \
@@ -271,7 +267,7 @@ jobs:
         # interpretation step.
         continue-on-error: true
         env:
-          AMAZON_PROXY: ${{ (github.event_name != 'schedule' || github.event.schedule == '23 6 * * 1') && secrets.AMAZON_PROXY || '' }}
+          AMAZON_PROXY: ${{ secrets.AMAZON_PROXY }}
         run: |
           set +e
           python3 playwright_scraper.py --mode product \
