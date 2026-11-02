@@ -1,4 +1,4 @@
-# amazon-scraper
+# Amazon Scraper — Search Results, Best Sellers and Reviews in Python
 
 [![release](https://img.shields.io/github/v/release/2scraper/amazon-scraper?sort=semver)](https://github.com/2scraper/amazon-scraper/releases)
 [![tests](https://github.com/2scraper/amazon-scraper/actions/workflows/tests.yml/badge.svg)](https://github.com/2scraper/amazon-scraper/actions/workflows/tests.yml)
@@ -7,6 +7,8 @@
 [![licence](https://img.shields.io/badge/licence-MIT-lightgrey)](LICENSE)
 [![engines](https://img.shields.io/badge/engines-Playwright%20%7C%20Selenium%20%7C%20pyppeteer%20%7C%20CDP-informational)](#engines)
 [![runs without an account](https://img.shields.io/badge/runs%20without-an%20account-brightgreen)](#what-works-with-nothing-at-all)
+
+**Amazon scraper** — an open-source (MIT) Python tool that reads Amazon search results, best-seller grids, product pages and the reviews shown to visitors with no account, on any of its 21 marketplaces, and writes them to JSON or CSV. Measured on 2026-09-08 from a residential exit IP in Europe with a plain local Chromium, a three-page search ran with no API key, no proxy and no account. Use it to build a product dataset, monitor prices, or compare two runs with `diff_runs.py`.
 
 Scrapes Amazon search results, best-seller grids, product pages and the
 reviews Amazon shows to visitors with no account — on any of its 21
@@ -542,6 +544,23 @@ already reads, so there is no flag to add and no credential on a command
 line.
 
 ---
+
+## Guides
+
+- [How to run the 2scraper scrapers: setup, proxies, exit codes and access modes](https://2captcha.com/h/how-to-run-2scraper-open-source-scrapers) — installation, `.env`, `.meta.json` for the whole family.
+
+## Related scrapers
+
+Same CLI conventions, same output contract (one row per item, JSON or CSV, a `.meta.json` sidecar and shared exit codes):
+
+- [Andie Swim scraper](https://github.com/2scraper/andieswim-scraper) — Collections, keyword lookups and per-size stock…
+- [Bershka scraper](https://github.com/2scraper/bershka-scraper) — Every SKU in a Bershka category
+- [Catawiki scraper](https://github.com/2scraper/catawiki-scraper) — Auction lots, bids, reserves, estimates and sellers…
+- [Etsy scraper](https://github.com/2scraper/etsy-scraper) — Search, category, shop and listing pages as JSON or CSV…
+- [Farfetch scraper](https://github.com/2scraper/farfetch-scraper) — Luxury fashion listings and per-size product data…
+- [Givenchy Beauty scraper](https://github.com/2scraper/givenchy-scraper) — Products, prices and shades across 11 storefront locales
+
+All scrapers: [github.com/2scraper](https://github.com/2scraper) · Need another site? [Open a request](https://github.com/2scraper/.github/issues/new?title=%5BScraper%20request%5D%20)
 
 ## Contributing, security, licence
 
